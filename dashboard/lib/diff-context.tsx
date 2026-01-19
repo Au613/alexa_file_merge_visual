@@ -8,7 +8,8 @@ import {
   exportDiffAsCSV, 
   exportExcludedRowsAsCSV,
   generateExcludedRowsExport,
-  reconstructOriginalFile
+  reconstructOriginalFile,
+  createRowToBlockMapping
 } from './diff-analysis'
 
 interface DiffContextType {
@@ -19,6 +20,7 @@ interface DiffContextType {
   // Analysis result
   diffAnalysis: DiffAnalysis | null
   excludedRowsExport: ExcludedRowsExport | null
+  rowToBlockMapping: Map<string, string>
   
   // UI state
   isAnalyzing: boolean
@@ -43,6 +45,7 @@ export function DiffProvider({ children }: { children: ReactNode }) {
   const [mergedFile, setMergedFile] = useState<UploadedFile | null>(null)
   const [diffAnalysis, setDiffAnalysis] = useState<DiffAnalysis | null>(null)
   const [excludedRowsExport, setExcludedRowsExport] = useState<ExcludedRowsExport | null>(null)
+  const [rowToBlockMapping, setRowToBlockMapping] = useState<Map<string, string>>(new Map())
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [hasAnalyzed, setHasAnalyzed] = useState(false)
 
@@ -51,6 +54,7 @@ export function DiffProvider({ children }: { children: ReactNode }) {
     setMergedFile(merged)
     setDiffAnalysis(null)
     setExcludedRowsExport(null)
+    setRowToBlockMapping(new Map())
     setHasAnalyzed(false)
   }, [])
 
@@ -73,6 +77,9 @@ export function DiffProvider({ children }: { children: ReactNode }) {
       const excluded = generateExcludedRowsExport(analysis)
       setExcludedRowsExport(excluded)
       
+      const blockMapping = createRowToBlockMapping(filesToUse)
+      setRowToBlockMapping(blockMapping)
+      
       setIsAnalyzing(false)
       setHasAnalyzed(true)
     }, 100)
@@ -83,6 +90,7 @@ export function DiffProvider({ children }: { children: ReactNode }) {
     setMergedFile(null)
     setDiffAnalysis(null)
     setExcludedRowsExport(null)
+    setRowToBlockMapping(new Map())
     setHasAnalyzed(false)
   }, [])
 
@@ -158,6 +166,7 @@ export function DiffProvider({ children }: { children: ReactNode }) {
       mergedFile,
       diffAnalysis,
       excludedRowsExport,
+      rowToBlockMapping,
       isAnalyzing,
       hasAnalyzed,
       setFiles,

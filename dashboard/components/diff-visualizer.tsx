@@ -59,7 +59,7 @@ export function DiffVisualizer({ onBack }: DiffVisualizerProps) {
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="flex-1 flex flex-col min-h-0">
       {/* Header */}
       <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -87,7 +87,7 @@ export function DiffVisualizer({ onBack }: DiffVisualizerProps) {
       </div>
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)} className="flex-1 flex flex-col">
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)} className="flex-1 flex flex-col min-h-0">
         <div className="px-4 border-b">
           <TabsList className="h-10">
             <TabsTrigger value="summary" className="gap-1.5">
@@ -111,15 +111,15 @@ export function DiffVisualizer({ onBack }: DiffVisualizerProps) {
           </TabsList>
         </div>
 
-        <TabsContent value="summary" className="flex-1 m-0 overflow-auto">
+        <TabsContent value="summary" className="flex-1 m-0 overflow-hidden flex flex-col min-h-0">
           <SummaryView analysis={diffAnalysis} onReverseMerge={downloadReconstructedFile} />
         </TabsContent>
 
-        <TabsContent value="table" className="flex-1 m-0 overflow-hidden">
+        <TabsContent value="table" className="flex-1 m-0">
           <TableView analysis={diffAnalysis} />
         </TabsContent>
 
-        <TabsContent value="log" className="flex-1 m-0 overflow-hidden">
+        <TabsContent value="log" className="flex-1 m-0 ">
           <LogView analysis={diffAnalysis} onReverseMerge={downloadReconstructedFile} />
         </TabsContent>
       </Tabs>
@@ -129,9 +129,12 @@ export function DiffVisualizer({ onBack }: DiffVisualizerProps) {
 
 // Summary View
 function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onReverseMerge: (idx: number) => void }) {
+  const { rowToBlockMapping, originalFiles } = useDiff()
+  
   return (
-    <ScrollArea className="flex-1 p-6">
-      <div className="max-w-4xl mx-auto space-y-6">
+    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+      <div className="px-8 py-6">
+        <div className="max-w-6xl mx-auto space-y-6">
         {/* Overall Stats */}
         <div className="grid grid-cols-4 gap-4">
           <StatCard 
@@ -206,7 +209,7 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
                   </div>
                   
                   {/* Progress bar */}
-                  <div className="h-3 bg-muted rounded-full overflow-hidden flex mb-2">
+                  <div className="h-3 bg-muted rounded-full flex mb-2">
                     <div 
                       className="h-full bg-green-500 transition-all"
                       style={{ width: `${keptPercent}%` }}
@@ -252,7 +255,7 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
               return (
                 <div key={file.fileIndex} className="flex items-center gap-2">
                   <span className="text-xs w-16 text-muted-foreground">File {idx + 1}</span>
-                  <div className="flex-1 h-4 bg-muted rounded overflow-hidden flex">
+                  <div className="flex-1 h-4 bg-muted rounded flex">
                     {groups.map((group, gIdx) => (
                       <div
                         key={gIdx}
@@ -280,10 +283,80 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
           </div>
         </div>
 
+        {/* Blocks Breakdown by File */}
+        <div>
+          <h3 className="text-sm font-medium mb-3">Blocks by Original File</h3>
+          <div className="grid grid-cols-2 gap-4">
+            {analysis.originalFiles.map((file, fileIdx) => {
+              // Get all blocks for this file from the mapping
+              const fileRowBlocks = new Map<string, { rowIndices: number[]; count: number; rows: typeof file.rows }>()
+              
+              file.rows.forEach(row => {
+                const blockLabel = rowToBlockMapping.get(`${file.fileIndex}:${row.originalRowIndex}`)
+                if (blockLabel) {
+                  if (!fileRowBlocks.has(blockLabel)) {
+                    fileRowBlocks.set(blockLabel, { rowIndices: [], count: 0, rows: [] })
+                  }
+                  const block = fileRowBlocks.get(blockLabel)!
+                  block.rowIndices.push(row.originalRowIndex)
+                  block.rows.push(row)
+                  block.count++
+                }
+              })
+              
+              const color = FILE_COLORS[fileIdx % FILE_COLORS.length]
+              const blocks = Array.from(fileRowBlocks.entries()).sort((a, b) => {
+                const aMin = Math.min(...a[1].rowIndices)
+                const bMin = Math.min(...b[1].rowIndices)
+                return aMin - bMin
+              })
+              
+              // Helper function to extract time portion from timestamp
+              const extractTime = (timestamp: string) => {
+                // Assumes format like "MM/DD/YYYY HH:MM:SS"
+                const parts = timestamp.split(' ')
+                return parts.length > 1 ? parts[1] : timestamp
+              }
+              
+              return (
+                <div key={file.fileIndex} className="p-4 rounded-lg border" style={{ borderColor: `${color.hex}40` }}>
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: color.hex }} />
+                    <span className="text-sm font-medium">File {fileIdx + 1}: {file.fileName}</span>
+                    <span className="text-xs text-muted-foreground ml-auto">({blocks.length} blocks)</span>
+                  </div>
+                  
+                  <div className="space-y-1">
+                    {blocks.map(([blockLabel, blockData]) => {
+                      const startTime = blockData.rows.length > 0 ? extractTime(blockData.rows[0].originalTimestamp) : '-'
+                      const endTime = blockData.rows.length > 0 ? extractTime(blockData.rows[blockData.rows.length - 1].originalTimestamp) : '-'
+                      
+                      return (
+                        <div key={blockLabel} className="flex items-center gap-2 text-xs">
+                          <div className="bg-amber-500/20 text-amber-700 px-2 py-1 rounded font-mono">
+                            {blockLabel}
+                          </div>
+                          <span className="text-muted-foreground">
+                            {blockData.count} rows (rows {Math.min(...blockData.rowIndices)}-{Math.max(...blockData.rowIndices)})
+                          </span>
+                          <span className="text-muted-foreground font-mono text-[10px]">
+                            {startTime} - {endTime}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
         {/* Merged File Block Visualization */}
         <MergedFileVisualization analysis={analysis} />
       </div>
-    </ScrollArea>
+      </div>
+    </div>
   )
 }
 
@@ -474,6 +547,7 @@ function StatCard({ label, value, className, percent }: {
 const ROWS_PER_PAGE = 100
 
 function TableView({ analysis }: { analysis: DiffAnalysis }) {
+  const { rowToBlockMapping } = useDiff()
   const [filterStatus, setFilterStatus] = useState<'all' | 'kept' | 'excluded'>('all')
   const [filterFile, setFilterFile] = useState<number | 'all'>('all')
   const [currentPage, setCurrentPage] = useState(1)
@@ -482,11 +556,18 @@ function TableView({ analysis }: { analysis: DiffAnalysis }) {
   const allRows = analysis.originalFiles.flatMap(file => file.rows)
   
   // Apply filters
-  const filteredRows = allRows.filter(row => {
-    if (filterStatus !== 'all' && row.status !== filterStatus) return false
-    if (filterFile !== 'all' && row.sourceFileIndex !== filterFile) return false
-    return true
-  })
+  const filteredRows = allRows
+    .filter(row => {
+      if (filterStatus !== 'all' && row.status !== filterStatus) return false
+      if (filterFile !== 'all' && row.sourceFileIndex !== filterFile) return false
+      return true
+    })
+    // Sort by timestamp (earliest first)
+    .sort((a, b) => {
+      const timeA = new Date(a.originalTimestamp).getTime()
+      const timeB = new Date(b.originalTimestamp).getTime()
+      return timeA - timeB
+    })
   
   // Pagination
   const totalPages = Math.ceil(filteredRows.length / ROWS_PER_PAGE)
@@ -563,6 +644,7 @@ function TableView({ analysis }: { analysis: DiffAnalysis }) {
             <tr className="border-b">
               <th className="px-3 py-2 text-left font-medium w-16">Status</th>
               <th colSpan={2} className="px-3 py-2 text-left font-medium border-r">Original File & Row</th>
+              <th className="px-3 py-2 text-left font-medium border-r">Block</th>
               <th colSpan={2} className="px-3 py-2 text-left font-medium border-r">Merged File & Row</th>
               <th colSpan={2} className="px-3 py-2 text-left font-medium border-r">Subject</th>
               <th colSpan={2} className="px-3 py-2 text-left font-medium border-r">Timestamp</th>
@@ -572,6 +654,7 @@ function TableView({ analysis }: { analysis: DiffAnalysis }) {
               <th className="px-3 py-1 text-left w-16"></th>
               <th className="px-3 py-1 text-left font-normal">File</th>
               <th className="px-3 py-1 text-left font-normal border-r">Row</th>
+              <th className="px-3 py-1 text-left font-normal border-r">Label</th>
               <th className="px-3 py-1 text-left font-normal">File</th>
               <th className="px-3 py-1 text-left font-normal border-r">Row</th>
               <th className="px-3 py-1 text-left font-normal">Original</th>
@@ -627,6 +710,13 @@ function TableView({ analysis }: { analysis: DiffAnalysis }) {
                   </td>
                   <td className="px-3 py-1.5 font-mono text-muted-foreground border-r">
                     {row.originalRowIndex}
+                  </td>
+                  
+                  {/* Block Label */}
+                  <td className="px-3 py-1.5 text-xs border-r">
+                    <span className="bg-amber-500/20 text-amber-700 px-2 py-0.5 rounded text-[10px] font-mono inline-block">
+                      {rowToBlockMapping.get(`${row.sourceFileIndex}:${row.originalRowIndex}`) || '-'}
+                    </span>
                   </td>
                   
                   {/* Merged File & Row */}

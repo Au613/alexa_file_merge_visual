@@ -98,6 +98,26 @@ export interface DataRow {
   _rowId: string          // Unique ID for this row
 }
 
+// Block types for grouping consecutive rows by subject and time proximity
+export interface DataBlock {
+  id: string
+  subject: string
+  startTimestamp: string  // First row's timestamp
+  endTimestamp: string    // Last row's timestamp
+  rows: DataRow[]
+  sourceFileName: string
+  sourceFileIndex: number
+}
+
+export interface BlockComparison {
+  originalBlock: DataBlock
+  mergedBlock: DataBlock | null
+  matchedRows: { original: DataRow; merged: DataRow }[]
+  excludedRows: DataRow[]
+  addedRows: DataRow[]
+  rowCountDifference: number
+}
+
 // Uploaded file representation (raw Excel data)
 export interface UploadedFile {
   id: string

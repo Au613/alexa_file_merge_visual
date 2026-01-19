@@ -87,6 +87,241 @@ function createRowKey(subject: string, behavior: string): string {
 }
 
 /**
+ * Parse timestamp string into a Date object for time calculations
+ */
+function parseTimestamp(ts: string): Date {
+  // Expected format: "MM/DD/YYYY HH:MM:SS"
+  const parts = ts.split(' ')
+  if (parts.length !== 2) return new Date(0)
+  
+  const [date, time] = parts
+  const [month, day, year] = date.split('/').map(Number)
+  const [hour, min, sec] = time.split(':').map(Number)
+  
+  return new Date(year, month - 1, day, hour, min, sec)
+}
+
+/**
+ * Calculate minutes between two timestamps
+ * Returns Infinity if either timestamp fails to parse (forces new block)
+ */
+function minutesBetween(ts1: string, ts2: string): number {
+  const date1 = parseTimestamp(ts1)
+  const date2 = parseTimestamp(ts2)
+
+  if (isNaN(date1.getTime()) || isNaN(date2.getTime())) {
+    return Infinity // force new block on parse failure
+  }
+
+  return Math.abs(date2.getTime() - date1.getTime()) / (1000 * 60)
+}
+
+/**
+ * Normalize subject for consistent comparison (trim, whitespace, case)
+ */
+function normalizeSubject(subject: string): string {
+  return subject.trim().replace(/\s+/g, ' ').toUpperCase()
+}
+
+/**
+ * Break rows into blocks by subject and time proximity (sequential runs only)
+ * 
+ * A new block starts if either:
+ * - subject differs from previous row, OR
+ * - time since previous row exceeds threshold
+ * 
+ * This creates "streaks" or "runs" that never re-enter earlier blocks,
+ * even if subject matches non-adjacent rows.
+ */
+export function createBlocksFromRows(
+  rows: Array<{ subject: string; timestamp: string; behavior: string; rowIndex: number }>,
+  fileName: string,
+  fileIndex: number,
+  timeThresholdMinutes: number = 10
+): Array<{
+  id: string
+  label: string
+  subject: string
+  startTimestamp: string
+  endTimestamp: string
+  rows: Array<{ subject: string; timestamp: string; behavior: string; rowIndex: number }>
+  sourceFileName: string
+  sourceFileIndex: number
+}> {
+  if (rows.length === 0) return []
+
+  const blocks = []
+  let blockIndex = 0
+
+  let currentBlock = {
+    id: `${fileName}_block_${blockIndex}`,
+    subject: rows[0].subject,
+    startTimestamp: rows[0].timestamp,
+    endTimestamp: rows[0].timestamp,
+    rows: [rows[0]],
+    sourceFileName: fileName,
+    sourceFileIndex: fileIndex
+  }
+
+  for (let i = 1; i < rows.length; i++) {
+    const prevRow = rows[i - 1]
+    const row = rows[i]
+
+    const sameSubject =
+      normalizeSubject(row.subject) === normalizeSubject(prevRow.subject)
+    const withinTime =
+      minutesBetween(prevRow.timestamp, row.timestamp) <= timeThresholdMinutes
+
+    if (sameSubject && withinTime) {
+      // Continue current block
+      currentBlock.rows.push(row)
+      currentBlock.endTimestamp = row.timestamp
+    } else {
+      // Save current block and start new one
+      const blockLabel = `${normalizeSubject(currentBlock.subject).substring(0, 15)}_${blockIndex}`
+      blocks.push({
+        id: currentBlock.id,
+        label: blockLabel,
+        subject: currentBlock.subject,
+        startTimestamp: currentBlock.startTimestamp,
+        endTimestamp: currentBlock.endTimestamp,
+        rows: currentBlock.rows,
+        sourceFileName: currentBlock.sourceFileName,
+        sourceFileIndex: currentBlock.sourceFileIndex
+      })
+
+      blockIndex++
+      currentBlock = {
+        id: `${fileName}_block_${blockIndex}`,
+        subject: row.subject,
+        startTimestamp: row.timestamp,
+        endTimestamp: row.timestamp,
+        rows: [row],
+        sourceFileName: fileName,
+        sourceFileIndex: fileIndex
+      }
+    }
+  }
+
+  // Push final block
+  const blockLabel = `${normalizeSubject(currentBlock.subject).substring(0, 15)}_${blockIndex}`
+  blocks.push({
+    id: currentBlock.id,
+    label: blockLabel,
+    subject: currentBlock.subject,
+    startTimestamp: currentBlock.startTimestamp,
+    endTimestamp: currentBlock.endTimestamp,
+    rows: currentBlock.rows,
+    sourceFileName: currentBlock.sourceFileName,
+    sourceFileIndex: currentBlock.sourceFileIndex
+  })
+
+  return blocks
+}
+
+/**
+ * Create a mapping from row index to block label for all files
+ */
+export function createRowToBlockMapping(
+  originalFiles: UploadedFile[],
+  timeThresholdMinutes: number = 10
+): Map<string, string> {
+  const mapping = new Map<string, string>()
+
+  originalFiles.forEach((file, fileIndex) => {
+    const blocks = createBlocksFromRows(
+      file.rows,
+      file.name,
+      fileIndex,
+      timeThresholdMinutes
+    )
+
+    blocks.forEach(block => {
+      block.rows.forEach(row => {
+        const key = `${fileIndex}:${row.rowIndex}`
+        mapping.set(key, block.label)
+      })
+    })
+  })
+
+  return mapping
+}
+
+/**
+ * Compare two blocks - checks which rows match between original and merged blocks
+ */
+export function compareBlocks(
+  originalBlock: {
+    subject: string
+    rows: Array<{ subject: string; timestamp: string; behavior: string; rowIndex: number }>
+    sourceFileName: string
+  },
+  mergedBlock: {
+    subject: string
+    rows: Array<{ subject: string; timestamp: string; behavior: string; rowIndex: number }>
+  } | null
+): {
+  matchedRows: Array<{ original: any; merged: any }>
+  excludedRows: Array<any>
+  addedRows: Array<any>
+  rowCountOriginal: number
+  rowCountMerged: number
+} {
+  const result = {
+    matchedRows: [] as Array<{ original: any; merged: any }>,
+    excludedRows: [] as Array<any>,
+    addedRows: [] as Array<any>,
+    rowCountOriginal: originalBlock.rows.length,
+    rowCountMerged: mergedBlock?.rows.length ?? 0
+  }
+
+  if (!mergedBlock) {
+    // Entire block was excluded
+    result.excludedRows = originalBlock.rows
+    return result
+  }
+
+  // Create a set to track which merged rows have been matched
+  const matchedMergedIndices = new Set<number>()
+
+  // Try to match each original row to a merged row
+  for (const origRow of originalBlock.rows) {
+    const origKey = createRowKey(origRow.subject, origRow.behavior)
+    let foundMatch = false
+
+    for (let i = 0; i < mergedBlock.rows.length; i++) {
+      if (matchedMergedIndices.has(i)) continue
+
+      const mergedRow = mergedBlock.rows[i]
+      const mergedKey = createRowKey(mergedRow.subject, mergedRow.behavior)
+
+      if (origKey === mergedKey) {
+        result.matchedRows.push({
+          original: origRow,
+          merged: mergedRow
+        })
+        matchedMergedIndices.add(i)
+        foundMatch = true
+        break
+      }
+    }
+
+    if (!foundMatch) {
+      result.excludedRows.push(origRow)
+    }
+  }
+
+  // Any unmatched merged rows are additions
+  for (let i = 0; i < mergedBlock.rows.length; i++) {
+    if (!matchedMergedIndices.has(i)) {
+      result.addedRows.push(mergedBlock.rows[i])
+    }
+  }
+
+  return result
+}
+
+/**
  * Analyze the diff between original files and merged file
  */
 export function analyzeFileDiff(
