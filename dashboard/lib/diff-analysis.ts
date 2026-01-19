@@ -80,10 +80,19 @@ function timestampsMatch(ts1: string, ts2: string): boolean {
 
 /**
  * Create a hash key for a row to help with matching
- * Uses subject + behavior (columns 1 and 3)
+ * Includes: subject + behavior + block-relative position for future robustness
+ * Format: subject||behavior||blockRelativeIndex
  */
-function createRowKey(subject: string, behavior: string): string {
-  return `${subject.trim()}||${behavior.trim()}`
+function createRowKey(subject: string, behavior: string, blockRelativeIndex?: number): string {
+  const normalizedSubject = normalizeSubject(subject)
+  const key = `${normalizedSubject}||${behavior.trim()}`
+  
+  // Include block-relative position if provided (more robust for complex scenarios)
+  if (blockRelativeIndex !== undefined) {
+    return `${key}||${blockRelativeIndex}`
+  }
+  
+  return key
 }
 
 /**
@@ -249,6 +258,7 @@ export function createRowToBlockMapping(
 
 /**
  * Compare two blocks - checks which rows match between original and merged blocks
+ * Uses block-relative position for more robust matching
  */
 export function compareBlocks(
   originalBlock: {
@@ -285,24 +295,49 @@ export function compareBlocks(
   const matchedMergedIndices = new Set<number>()
 
   // Try to match each original row to a merged row
-  for (const origRow of originalBlock.rows) {
-    const origKey = createRowKey(origRow.subject, origRow.behavior)
+  for (let origIdx = 0; origIdx < originalBlock.rows.length; origIdx++) {
+    const origRow = originalBlock.rows[origIdx]
+    
+    // First try matching with block-relative position
+    const origKeyWithPosition = createRowKey(origRow.subject, origRow.behavior, origIdx)
     let foundMatch = false
 
-    for (let i = 0; i < mergedBlock.rows.length; i++) {
-      if (matchedMergedIndices.has(i)) continue
+    for (let mergedIdx = 0; mergedIdx < mergedBlock.rows.length; mergedIdx++) {
+      if (matchedMergedIndices.has(mergedIdx)) continue
 
-      const mergedRow = mergedBlock.rows[i]
-      const mergedKey = createRowKey(mergedRow.subject, mergedRow.behavior)
+      const mergedRow = mergedBlock.rows[mergedIdx]
+      const mergedKeyWithPosition = createRowKey(mergedRow.subject, mergedRow.behavior, mergedIdx)
 
-      if (origKey === mergedKey) {
+      if (origKeyWithPosition === mergedKeyWithPosition) {
         result.matchedRows.push({
           original: origRow,
           merged: mergedRow
         })
-        matchedMergedIndices.add(i)
+        matchedMergedIndices.add(mergedIdx)
         foundMatch = true
         break
+      }
+    }
+
+    // If position-based match failed, fall back to subject+behavior only
+    if (!foundMatch) {
+      const origKeyWithoutPosition = createRowKey(origRow.subject, origRow.behavior)
+
+      for (let mergedIdx = 0; mergedIdx < mergedBlock.rows.length; mergedIdx++) {
+        if (matchedMergedIndices.has(mergedIdx)) continue
+
+        const mergedRow = mergedBlock.rows[mergedIdx]
+        const mergedKeyWithoutPosition = createRowKey(mergedRow.subject, mergedRow.behavior)
+
+        if (origKeyWithoutPosition === mergedKeyWithoutPosition) {
+          result.matchedRows.push({
+            original: origRow,
+            merged: mergedRow
+          })
+          matchedMergedIndices.add(mergedIdx)
+          foundMatch = true
+          break
+        }
       }
     }
 
@@ -323,141 +358,359 @@ export function compareBlocks(
 
 /**
  * Analyze the diff between original files and merged file
+ * 
+ * Architecture:
+ * 1. Create blocks for all files (original + merged)
+ * 2. Align original blocks to merged blocks via row provenance
+ * 3. Compare rows only within aligned block pairs
+ * 4. Rows in unaligned blocks are automatically excluded or added
  */
 export function analyzeFileDiff(
   originalFiles: UploadedFile[],
   mergedFile: UploadedFile
 ): DiffAnalysis {
-  // Extract date from first file or merged file name
+  // Extract date from merged file name
   const dateMatch = mergedFile.name.match(/(\d{4})\.(\d{2})\.(\d{2})/) || 
                     mergedFile.name.match(/(\d{4})-(\d{2})-(\d{2})/)
   const date = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : 'Unknown'
   const displayDate = dateMatch ? `${dateMatch[2]}/${dateMatch[3]}/${dateMatch[1]}` : 'Unknown'
   
-  console.log("[v0] Starting diff analysis")
-  console.log("[v0] Merged file:", mergedFile.name, "with", mergedFile.rows.length, "rows")
-  console.log("[v0] Original files:", originalFiles.map(f => `${f.name} (${f.rows.length} rows)`))
+  console.log("[analyzeFileDiff] Starting block-based diff analysis")
+  console.log("[analyzeFileDiff] Merged file:", mergedFile.name, "with", mergedFile.rows.length, "rows")
   
-  // Log sample rows from merged file
-  if (mergedFile.rows.length > 0) {
-    console.log("[v0] Merged file sample row 1:", mergedFile.rows[0])
-    if (mergedFile.rows.length > 1) {
-      console.log("[v0] Merged file sample row 2:", mergedFile.rows[1])
-    }
-  }
-  
-  // Log sample rows from original files
-  originalFiles.forEach((f, i) => {
-    if (f.rows.length > 0) {
-      console.log(`[v0] Original file ${i + 1} sample row 1:`, f.rows[0])
-    }
-  })
-  
-  // Build lookup map for merged file rows
-  // Key: subject + behavior (columns 1 and 3)
-  // Value: array of { mergedRowIndex, timestamp, subject, behavior }
-  const mergedRowsMap = new Map<string, { mergedRowIndex: number; timestamp: string; subject: string; behavior: string }[]>()
-  
-  mergedFile.rows.forEach((row, idx) => {
-    const key = createRowKey(row.subject, row.behavior)
-    if (!mergedRowsMap.has(key)) {
-      mergedRowsMap.set(key, [])
-    }
-    mergedRowsMap.get(key)!.push({
-      mergedRowIndex: idx + 1,
-      timestamp: row.timestamp,
-      subject: row.subject,
-      behavior: row.behavior
+  // STEP 1: Create blocks for all files
+  const originalFileBlocks = originalFiles.map((file, fileIndex) =>
+    createBlocksFromRows(file.rows, file.name, fileIndex)
+  )
+
+  const mergedBlocks = createBlocksFromRows(
+    mergedFile.rows,
+    mergedFile.name,
+    -1 // merged file has no source index
+  )
+
+  console.log("[analyzeFileDiff] Created", originalFileBlocks.flat().length, "blocks from original files,", mergedBlocks.length, "blocks in merged file")
+
+  // STEP 2: Annotate rows with block identity
+  originalFileBlocks.forEach((fileBlocks, fileIndex) => {
+    fileBlocks.forEach(block => {
+      block.rows.forEach(row => {
+        ;(row as any).blockId = block.id
+        ;(row as any).sourceFileIndex = fileIndex
+      })
     })
   })
-  
-  console.log("[v0] Built merged rows map with", mergedRowsMap.size, "unique subject+behavior keys")
-  
-  // Track which merged rows have been matched to avoid double-counting
-  const matchedMergedRows = new Set<number>()
-  
-  // Analyze each original file
-  const fileAnalyses = originalFiles.map((origFile, fileIndex) => {
-    const rowDiffs: RowDiffRecord[] = []
-    let keptCount = 0
-    let excludedCount = 0
-    let timestampModCount = 0
-    
-    console.log(`[v0] Analyzing file ${fileIndex + 1}: ${origFile.name}`)
-    
-    origFile.rows.forEach((origRow, rowIdx) => {
-      const key = createRowKey(origRow.subject, origRow.behavior)
-      const possibleMatches = mergedRowsMap.get(key) || []
-      
-      // Find a match that hasn't been used yet
-      let match: { mergedRowIndex: number; timestamp: string; subject: string; behavior: string } | undefined
-      
-      for (const candidate of possibleMatches) {
-        if (!matchedMergedRows.has(candidate.mergedRowIndex)) {
-          match = candidate
-          matchedMergedRows.add(candidate.mergedRowIndex)
-          break
-        }
+
+  mergedBlocks.forEach(block => {
+    block.rows.forEach(row => {
+      ;(row as any).blockId = block.id
+      ;(row as any).sourceFileIndex = -1
+    })
+  })
+
+  // STEP 3: Build lineage map — which original blocks fed which merged blocks
+  // Track both block identity AND row indices for contiguity checking
+  // Build TWO lookup maps: one with position, one without
+  const mergedRowLookupWithPos = new Map<string, { 
+    row: any
+    blockId: string
+    blockRowIndex: number
+  }[]>()
+
+  const mergedRowLookupNoPos = new Map<string, { 
+    row: any
+    blockId: string
+    blockRowIndex: number
+  }[]>()
+
+  mergedBlocks.forEach(block => {
+    block.rows.forEach((row, blockRowIndex) => {
+      // Build lookup WITH position
+      const keyWithPos = createRowKey(row.subject, row.behavior, blockRowIndex)
+      if (!mergedRowLookupWithPos.has(keyWithPos)) {
+        mergedRowLookupWithPos.set(keyWithPos, [])
       }
-      
-      // Log first few rows with side-by-side comparison
-      if (rowIdx < 5) {
-        if (match) {
-          console.log(`[v0] MATCH | Original[File${fileIndex + 1}, Row${origRow.rowIndex}]: subject="${origRow.subject}", behavior="${origRow.behavior}", ts="${origRow.timestamp}" | Merged[Row${match.mergedRowIndex}]: subject="${match.subject}", behavior="${match.behavior}", ts="${match.timestamp}"`)
-        } else {
-          console.log(`[v0] NO MATCH | Original[File${fileIndex + 1}, Row${origRow.rowIndex}]: subject="${origRow.subject}", behavior="${origRow.behavior}", ts="${origRow.timestamp}" | Key="${key}" not found in merged file`)
-        }
+      mergedRowLookupWithPos.get(keyWithPos)!.push({
+        row: row as any,
+        blockId: block.id,
+        blockRowIndex: blockRowIndex
+      })
+
+      // Build lookup WITHOUT position
+      const keyNoPos = createRowKey(row.subject, row.behavior)
+      if (!mergedRowLookupNoPos.has(keyNoPos)) {
+        mergedRowLookupNoPos.set(keyNoPos, [])
       }
-      
-      if (match) {
-        // Row was kept
-        const timestampModified = !timestampsMatch(origRow.timestamp, match.timestamp)
+      mergedRowLookupNoPos.get(keyNoPos)!.push({
+        row: row as any,
+        blockId: block.id,
+        blockRowIndex: blockRowIndex
+      })
+    })
+  })
+
+  // Track which original blocks contributed to which merged blocks
+  // Include row range (firstMatchedIdx, lastMatchedIdx) for contiguity checking
+  interface BlockOriginInfo {
+    blockId: string
+    firstMatchedRowIdx: number
+    lastMatchedRowIdx: number
+    totalMatches: number
+  }
+
+  const mergedBlockOrigins = new Map<string, BlockOriginInfo[]>()
+
+  // IMPORTANT: Compute lineage independently for each original block (no shared mutable state)
+  // This ensures deterministic alignment regardless of file processing order
+  originalFileBlocks.forEach((fileBlocks, fileIndex) => {
+    fileBlocks.forEach(origBlock => {
+      const origBlockRowIndices: number[] = []
+
+      // For each row in this original block, find matching merged rows
+      origBlock.rows.forEach((origRow, origBlockRowIndex) => {
+        // Try positional match first
+        const keyWithPosition = createRowKey(origRow.subject, origRow.behavior, origBlockRowIndex)
+        let candidates = mergedRowLookupWithPos.get(keyWithPosition) || []
         
-        rowDiffs.push({
-          originalRowIndex: origRow.rowIndex,
-          sourceFileName: origFile.name,
+        // Fall back to position-less match if positional match not found
+        if (candidates.length === 0) {
+          const keyNoPos = createRowKey(origRow.subject, origRow.behavior)
+          candidates = mergedRowLookupNoPos.get(keyNoPos) || []
+        }
+
+        // Take the first candidate (deterministic, position-based priority)
+        if (candidates.length > 0) {
+          const match = candidates[0]
+          origBlockRowIndices.push(match.blockRowIndex)
+        }
+      })
+
+      // If this original block matched any merged rows, record the lineage
+      if (origBlockRowIndices.length > 0) {
+        const firstIdx = Math.min(...origBlockRowIndices)
+        const lastIdx = Math.max(...origBlockRowIndices)
+
+        // Track which merged blocks this original block feeds into
+        // Do this by checking all matched row indices and finding their block IDs
+        const mergedBlocksContributed = new Set<string>()
+
+        origBlock.rows.forEach((origRow, origBlockRowIndex) => {
+          const keyWithPosition = createRowKey(origRow.subject, origRow.behavior, origBlockRowIndex)
+          let candidates = mergedRowLookupWithPos.get(keyWithPosition) || []
+
+          if (candidates.length === 0) {
+            const keyNoPos = createRowKey(origRow.subject, origRow.behavior)
+            candidates = mergedRowLookupNoPos.get(keyNoPos) || []
+          }
+
+          // Add all candidate merged blocks (don't mutate, just track)
+          candidates.forEach(candidate => {
+            mergedBlocksContributed.add(candidate.blockId)
+          })
+        })
+
+        // Record this original block as an origin for each merged block it feeds
+        mergedBlocksContributed.forEach(mergedBlockId => {
+          if (!mergedBlockOrigins.has(mergedBlockId)) {
+            mergedBlockOrigins.set(mergedBlockId, [])
+          }
+          const origins = mergedBlockOrigins.get(mergedBlockId)!
+          // Avoid duplicates
+          if (!origins.find(o => o.blockId === origBlock.id)) {
+            origins.push({
+              blockId: origBlock.id,
+              firstMatchedRowIdx: firstIdx,
+              lastMatchedRowIdx: lastIdx,
+              totalMatches: origBlockRowIndices.length
+            })
+          }
+        })
+      }
+    })
+  })
+
+  console.log("[analyzeFileDiff] Lineage tracking complete:", mergedBlockOrigins.size, "merged blocks have origins")
+
+  // STEP 4: Build aligned block pairs (enforce one-to-one alignment where possible)
+  interface AlignedBlockPair {
+    originalBlocks: ReturnType<typeof createBlocksFromRows>
+    mergedBlock: ReturnType<typeof createBlocksFromRows>[0]
+  }
+
+  const alignedBlocks: AlignedBlockPair[] = []
+  const alignedMergedBlockIds = new Set<string>()
+  const alignedOriginalBlockIds = new Set<string>()
+
+  mergedBlocks.forEach(mergedBlock => {
+    const origins = mergedBlockOrigins.get(mergedBlock.id)
+    if (!origins || origins.length === 0) return
+
+    // Enforce one-to-one alignment: pick the original block with best contiguity
+    // "Best" = most rows in contiguous range in merged block, or fewest gaps
+    let bestOrigin: BlockOriginInfo | null = null
+    let bestScore = -1
+
+    origins.forEach(origin => {
+      // Score = number of matches (higher is better)
+      // If tied, prefer the block that spans a tighter range (lower range = more contiguous)
+      const range = origin.lastMatchedRowIdx - origin.firstMatchedRowIdx + 1
+      const contiguityScore = origin.totalMatches / range
+
+      if (origin.totalMatches > bestScore || 
+          (origin.totalMatches === bestScore && bestOrigin && 
+           contiguityScore > (bestOrigin.totalMatches / (bestOrigin.lastMatchedRowIdx - bestOrigin.firstMatchedRowIdx + 1)))) {
+        bestScore = origin.totalMatches
+        bestOrigin = origin
+      }
+    })
+
+    if (bestOrigin === null) return
+
+    // Find the original block object
+    const originBlock = originalFileBlocks
+      .flat()
+      .find(b => b.id === (bestOrigin as BlockOriginInfo).blockId)
+
+    if (!originBlock) return
+
+    alignedBlocks.push({
+      originalBlocks: [originBlock],
+      mergedBlock
+    })
+
+    alignedMergedBlockIds.add(mergedBlock.id)
+    alignedOriginalBlockIds.add((bestOrigin as BlockOriginInfo).blockId)
+  })
+
+  // Detect excluded and added blocks
+  const excludedBlocks = originalFileBlocks
+    .flat()
+    .filter(b => !alignedOriginalBlockIds.has(b.id))
+
+  const addedBlocks = mergedBlocks.filter(b => !alignedMergedBlockIds.has(b.id))
+
+  console.log("[analyzeFileDiff] Aligned:", alignedBlocks.length, "block pairs, Excluded:", excludedBlocks.length, "original blocks, Added:", addedBlocks.length, "merged blocks")
+
+  // STEP 5: Compare rows within aligned block pairs
+  const rowDiffsByFile = new Map<number, RowDiffRecord[]>()
+  const fileStats = new Map<number, { kept: number; excluded: number; timestampMods: number }>()
+
+  // Initialize file stats
+  originalFiles.forEach((file, idx) => {
+    rowDiffsByFile.set(idx, [])
+    fileStats.set(idx, { kept: 0, excluded: 0, timestampMods: 0 })
+  })
+
+  // Compare aligned blocks
+  alignedBlocks.forEach(({ originalBlocks, mergedBlock }) => {
+    originalBlocks.forEach(originalBlock => {
+      const result = compareBlocks(originalBlock, mergedBlock)
+
+      const fileIndex = originalBlock.sourceFileIndex
+      const diffs = rowDiffsByFile.get(fileIndex) || []
+      const stats = fileStats.get(fileIndex) || { kept: 0, excluded: 0, timestampMods: 0 }
+
+      // Convert matched rows to RowDiffRecords
+      result.matchedRows.forEach(({ original, merged }) => {
+        const timestampModified = !timestampsMatch(original.timestamp, merged.timestamp)
+
+        diffs.push({
+          originalRowIndex: original.rowIndex,
+          sourceFileName: originalBlock.sourceFileName,
           sourceFileIndex: fileIndex,
-          subject: origRow.subject,
-          originalTimestamp: origRow.timestamp,
-          behavior: origRow.behavior,
+          subject: original.subject,
+          originalTimestamp: original.timestamp,
+          behavior: original.behavior,
           status: 'kept',
-          mergedRowIndex: match.mergedRowIndex,
-          newTimestamp: timestampModified ? match.timestamp : undefined,
+          mergedRowIndex: merged.rowIndex, // Will be adjusted below
+          newTimestamp: timestampModified ? merged.timestamp : undefined,
           timestampModified
         })
-        
-        keptCount++
-        if (timestampModified) timestampModCount++
-      } else {
-        // Row was excluded
-        rowDiffs.push({
-          originalRowIndex: origRow.rowIndex,
-          sourceFileName: origFile.name,
+
+        stats.kept++
+        if (timestampModified) stats.timestampMods++
+      })
+
+      // Convert excluded rows
+      result.excludedRows.forEach(row => {
+        diffs.push({
+          originalRowIndex: row.rowIndex,
+          sourceFileName: originalBlock.sourceFileName,
           sourceFileIndex: fileIndex,
-          subject: origRow.subject,
-          originalTimestamp: origRow.timestamp,
-          behavior: origRow.behavior,
+          subject: row.subject,
+          originalTimestamp: row.timestamp,
+          behavior: row.behavior,
           status: 'excluded',
           timestampModified: false
         })
-        
-        excludedCount++
-      }
+
+        stats.excluded++
+      })
+
+      rowDiffsByFile.set(fileIndex, diffs)
+      fileStats.set(fileIndex, stats)
     })
-    
-    console.log(`[v0] File ${fileIndex + 1} results: ${keptCount} kept, ${excludedCount} excluded, ${timestampModCount} timestamp mods`)
-    
+  })
+
+  // Mark entire excluded blocks as excluded
+  excludedBlocks.forEach(block => {
+    const fileIndex = block.sourceFileIndex
+    const diffs = rowDiffsByFile.get(fileIndex) || []
+
+    block.rows.forEach(row => {
+      diffs.push({
+        originalRowIndex: row.rowIndex,
+        sourceFileName: block.sourceFileName,
+        sourceFileIndex: fileIndex,
+        subject: row.subject,
+        originalTimestamp: row.timestamp,
+        behavior: row.behavior,
+        status: 'excluded',
+        timestampModified: false
+      })
+    })
+
+    const stats = fileStats.get(fileIndex) || { kept: 0, excluded: 0, timestampMods: 0 }
+    stats.excluded += block.rows.length
+    fileStats.set(fileIndex, stats)
+    rowDiffsByFile.set(fileIndex, diffs)
+  })
+
+  // Assign merged row indices (sequential for kept rows only)
+  let mergedRowCounter = 1
+  originalFiles.forEach((file, fileIdx) => {
+    const diffs = rowDiffsByFile.get(fileIdx) || []
+    diffs
+      .filter(d => d.status === 'kept')
+      .sort((a, b) => a.originalRowIndex - b.originalRowIndex)
+      .forEach(diff => {
+        diff.mergedRowIndex = mergedRowCounter++
+      })
+  })
+
+  // Build file analyses
+  const fileAnalyses = originalFiles.map((file, fileIndex) => {
+    const diffs = rowDiffsByFile.get(fileIndex) || []
+    const stats = fileStats.get(fileIndex) || { kept: 0, excluded: 0, timestampMods: 0 }
+
     return {
       fileIndex,
-      fileName: origFile.name,
-      totalRows: origFile.rows.length,
-      keptRows: keptCount,
-      excludedRows: excludedCount,
-      timestampModifications: timestampModCount,
-      rows: rowDiffs
+      fileName: file.name,
+      totalRows: file.rows.length,
+      keptRows: stats.kept,
+      excludedRows: stats.excluded,
+      timestampModifications: stats.timestampMods,
+      rows: diffs
     }
   })
-  
+
+  const totalOriginalRows = fileAnalyses.reduce((sum, f) => sum + f.totalRows, 0)
+  const totalKept = fileAnalyses.reduce((sum, f) => sum + f.keptRows, 0)
+  const totalExcluded = fileAnalyses.reduce((sum, f) => sum + f.excludedRows, 0)
+  const totalTimestampMods = fileAnalyses.reduce((sum, f) => sum + f.timestampModifications, 0)
+
+  console.log("[analyzeFileDiff] Complete: kept=", totalKept, "excluded=", totalExcluded, "timestamp mods=", totalTimestampMods)
+
   return {
     date,
     displayDate,
@@ -467,10 +720,10 @@ export function analyzeFileDiff(
       fileName: mergedFile.name,
       totalRows: mergedFile.rows.length
     },
-    totalOriginalRows: fileAnalyses.reduce((sum, f) => sum + f.totalRows, 0),
-    totalKept: fileAnalyses.reduce((sum, f) => sum + f.keptRows, 0),
-    totalExcluded: fileAnalyses.reduce((sum, f) => sum + f.excludedRows, 0),
-    totalTimestampModifications: fileAnalyses.reduce((sum, f) => sum + f.timestampModifications, 0)
+    totalOriginalRows,
+    totalKept,
+    totalExcluded,
+    totalTimestampModifications: totalTimestampMods
   }
 }
 

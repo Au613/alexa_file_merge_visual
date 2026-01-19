@@ -33,6 +33,34 @@ const FILE_COLORS = [
   { hex: '#06b6d4', name: 'Cyan' },
 ]
 
+// Rainbow colors for blocks (sequential by time) - softened/muted
+const BLOCK_COLORS = [
+  { hex: '#DC143C', name: 'Crimson' },           // 0 - softer red
+  { hex: '#FF8C00', name: 'Orange' },            // 1 - softer orange
+  { hex: '#DAA520', name: 'Goldenrod' },         // 2 - softer yellow
+  { hex: '#228B22', name: 'Forest Green' },      // 3 - softer green
+  { hex: '#4169E1', name: 'Royal Blue' },        // 4 - softer blue
+  { hex: '#6A5ACD', name: 'Slate Blue' },        // 5 - softer indigo
+  { hex: '#9370DB', name: 'Medium Purple' },     // 6 - softer violet
+  { hex: '#CD5C5C', name: 'Indian Red' },        // 7 - softer deep pink
+  { hex: '#20B2AA', name: 'Light Sea Green' },   // 8 - softer turquoise
+  { hex: '#8FBC8F', name: 'Dark Sea Green' },    // 9 - softer lime
+  { hex: '#B22222', name: 'Firebrick' },         // 10 - softer hot pink
+  { hex: '#6495ED', name: 'Cornflower Blue' },   // 11 - softer dodger blue
+]
+
+/**
+ * Get a consistent color for a block label across all visualizations
+ * Blocks are colored sequentially by their first appearance time
+ */
+function getBlockColor(blockLabel: string, blockColorMap: Map<string, { hex: string; name: string }>): { hex: string; name: string } {
+  if (!blockColorMap.has(blockLabel)) {
+    const nextIdx = blockColorMap.size % BLOCK_COLORS.length
+    blockColorMap.set(blockLabel, BLOCK_COLORS[nextIdx])
+  }
+  return blockColorMap.get(blockLabel)!
+}
+
 interface DiffVisualizerProps {
   onBack: () => void
 }
@@ -283,72 +311,168 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
           </div>
         </div>
 
-        {/* Blocks Breakdown by File */}
+        {/* Blocks by File - Original vs Merged */}
         <div>
-          <h3 className="text-sm font-medium mb-3">Blocks by Original File</h3>
+          <h3 className="text-sm font-medium mb-3">Blocks by File</h3>
           <div className="grid grid-cols-2 gap-4">
-            {analysis.originalFiles.map((file, fileIdx) => {
-              // Get all blocks for this file from the mapping
-              const fileRowBlocks = new Map<string, { rowIndices: number[]; count: number; rows: typeof file.rows }>()
-              
-              file.rows.forEach(row => {
-                const blockLabel = rowToBlockMapping.get(`${file.fileIndex}:${row.originalRowIndex}`)
-                if (blockLabel) {
-                  if (!fileRowBlocks.has(blockLabel)) {
-                    fileRowBlocks.set(blockLabel, { rowIndices: [], count: 0, rows: [] })
+            {/* LEFT: Original Files Blocks */}
+            <div className="space-y-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">Original Files</div>
+              {analysis.originalFiles.map((file, fileIdx) => {
+                // Create a map to assign consistent colors to blocks
+                const blockColorMap = new Map<string, { hex: string; name: string }>()
+                
+                // Get all blocks for this file from the mapping
+                const fileRowBlocks = new Map<string, { rowIndices: number[]; count: number; rows: typeof file.rows }>()
+                
+                file.rows.forEach(row => {
+                  const blockLabel = rowToBlockMapping.get(`${file.fileIndex}:${row.originalRowIndex}`)
+                  if (blockLabel) {
+                    if (!fileRowBlocks.has(blockLabel)) {
+                      fileRowBlocks.set(blockLabel, { rowIndices: [], count: 0, rows: [] })
+                    }
+                    const block = fileRowBlocks.get(blockLabel)!
+                    block.rowIndices.push(row.originalRowIndex)
+                    block.rows.push(row)
+                    block.count++
                   }
-                  const block = fileRowBlocks.get(blockLabel)!
-                  block.rowIndices.push(row.originalRowIndex)
-                  block.rows.push(row)
-                  block.count++
+                })
+                
+                const color = FILE_COLORS[fileIdx % FILE_COLORS.length]
+                const blocks = Array.from(fileRowBlocks.entries()).sort((a, b) => {
+                  const aMin = Math.min(...a[1].rowIndices)
+                  const bMin = Math.min(...b[1].rowIndices)
+                  return aMin - bMin
+                })
+                
+                // Helper function to extract time portion from timestamp
+                const extractTime = (timestamp: string) => {
+                  // Assumes format like "MM/DD/YYYY HH:MM:SS"
+                  const parts = timestamp.split(' ')
+                  return parts.length > 1 ? parts[1] : timestamp
                 }
-              })
-              
-              const color = FILE_COLORS[fileIdx % FILE_COLORS.length]
-              const blocks = Array.from(fileRowBlocks.entries()).sort((a, b) => {
-                const aMin = Math.min(...a[1].rowIndices)
-                const bMin = Math.min(...b[1].rowIndices)
-                return aMin - bMin
-              })
-              
-              // Helper function to extract time portion from timestamp
-              const extractTime = (timestamp: string) => {
-                // Assumes format like "MM/DD/YYYY HH:MM:SS"
-                const parts = timestamp.split(' ')
-                return parts.length > 1 ? parts[1] : timestamp
-              }
-              
-              return (
-                <div key={file.fileIndex} className="p-4 rounded-lg border" style={{ borderColor: `${color.hex}40` }}>
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: color.hex }} />
-                    <span className="text-sm font-medium">File {fileIdx + 1}: {file.fileName}</span>
-                    <span className="text-xs text-muted-foreground ml-auto">({blocks.length} blocks)</span>
+                
+                return (
+                  <div key={file.fileIndex} className="p-4 rounded-lg border" style={{ borderColor: `${color.hex}40` }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: color.hex }} />
+                      <span className="text-sm font-medium">File {fileIdx + 1}: {file.fileName}</span>
+                      <span className="text-xs text-muted-foreground ml-auto">({blocks.length} blocks)</span>
+                    </div>
+                    
+                    <div className="space-y-1">
+                      {blocks.map(([blockLabel, blockData], blockIdx) => {
+                        const blockColor = getBlockColor(blockLabel, blockColorMap)
+                        const startTime = blockData.rows.length > 0 ? extractTime(blockData.rows[0].originalTimestamp) : '-'
+                        const endTime = blockData.rows.length > 0 ? extractTime(blockData.rows[blockData.rows.length - 1].originalTimestamp) : '-'
+                        
+                        return (
+                          <div key={blockLabel} className="flex items-center gap-2 text-xs">
+                            <div 
+                              className="px-2 py-1 rounded font-mono text-white text-[11px] font-bold"
+                              style={{ backgroundColor: blockColor.hex }}
+                            >
+                              {blockLabel}
+                            </div>
+                            <span className="text-muted-foreground">
+                              {blockData.count} rows (rows {Math.min(...blockData.rowIndices)}-{Math.max(...blockData.rowIndices)})
+                            </span>
+                            <span className="text-muted-foreground font-mono text-[10px]">
+                              {startTime} - {endTime}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
                   </div>
-                  
-                  <div className="space-y-1">
-                    {blocks.map(([blockLabel, blockData]) => {
-                      const startTime = blockData.rows.length > 0 ? extractTime(blockData.rows[0].originalTimestamp) : '-'
-                      const endTime = blockData.rows.length > 0 ? extractTime(blockData.rows[blockData.rows.length - 1].originalTimestamp) : '-'
+                )
+              })}
+            </div>
+
+            {/* RIGHT: Merged File Blocks */}
+            <div className="space-y-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">Merged File</div>
+              {(() => {
+                const blocks = generateMergedFileBlocks(analysis)
+                const blockColorMap = new Map<string, { hex: string; name: string }>()
+                
+                // Build block color map
+                analysis.originalFiles.forEach((file) => {
+                  file.rows.forEach(row => {
+                    const blockLabel = rowToBlockMapping.get(`${file.fileIndex}:${row.originalRowIndex}`)
+                    if (blockLabel) {
+                      getBlockColor(blockLabel, blockColorMap)
+                    }
+                  })
+                })
+                
+                // Helper function to extract time from timestamp
+                const extractTime = (timestamp: string) => {
+                  const parts = timestamp.split(' ')
+                  return parts.length > 1 ? parts[1] : timestamp
+                }
+                
+                return (
+                  <div className="space-y-3">
+                    {blocks.map((block, idx) => {
+                      const sourceFile = analysis.originalFiles[block.sourceFileIndex]
+                      const blockRows = sourceFile?.rows.filter(r => 
+                        r.originalRowIndex >= block.originalStartRow && 
+                        r.originalRowIndex <= block.originalEndRow
+                      ) || []
+                      const blockLabel = blockRows.length > 0 ? 
+                        (rowToBlockMapping.get(`${block.sourceFileIndex}:${blockRows[0].originalRowIndex}`) || '-') : '-'
+                      const blockColor = blockLabel !== '-' ? blockColorMap.get(blockLabel) : null
+                      const sourceFileColor = FILE_COLORS[block.sourceFileIndex % FILE_COLORS.length]
+                      
+                      const startTime = blockRows.length > 0 ? extractTime(blockRows[0].originalTimestamp) : '-'
+                      const endTime = blockRows.length > 0 ? extractTime(blockRows[blockRows.length - 1].originalTimestamp) : '-'
                       
                       return (
-                        <div key={blockLabel} className="flex items-center gap-2 text-xs">
-                          <div className="bg-amber-500/20 text-amber-700 px-2 py-1 rounded font-mono">
-                            {blockLabel}
+                        <div 
+                          key={idx}
+                          className="p-3 rounded-lg border"
+                          style={{ borderColor: `${sourceFileColor.hex}40` }}
+                        >
+                          <div className="flex items-center gap-2 mb-2">
+                            <div className="w-2 h-2 rounded-sm" style={{ backgroundColor: sourceFileColor.hex }} />
+                            <span className="text-xs font-medium">Block #{idx + 1}</span>
+                            <span className="text-[10px] text-muted-foreground">
+                              rows {block.mergedStartRow}-{block.mergedEndRow}
+                            </span>
                           </div>
-                          <span className="text-muted-foreground">
-                            {blockData.count} rows (rows {Math.min(...blockData.rowIndices)}-{Math.max(...blockData.rowIndices)})
-                          </span>
-                          <span className="text-muted-foreground font-mono text-[10px]">
-                            {startTime} - {endTime}
-                          </span>
+                          
+                          <div className="flex items-center gap-2 flex-wrap gap-y-1">
+                            {blockColor ? (
+                              <div 
+                                className="px-2 py-0.5 rounded text-white text-[10px] font-bold"
+                                style={{ backgroundColor: blockColor.hex }}
+                              >
+                                {blockLabel}
+                              </div>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">{blockLabel}</span>
+                            )}
+                            
+                            <span className="text-[10px] text-muted-foreground">
+                              From: File {block.sourceFileIndex + 1}
+                            </span>
+                            
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {startTime} - {endTime}
+                            </span>
+                            
+                            {block.hasTimestampMods && (
+                              <span className="text-[10px] text-amber-600 ml-auto">⏱ Modified</span>
+                            )}
+                          </div>
                         </div>
                       )
                     })}
                   </div>
-                </div>
-              )
-            })}
+                )
+              })()}
+            </div>
           </div>
         </div>
 
@@ -363,7 +487,28 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
 // Merged File Visualization Component
 function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
   const blocks = generateMergedFileBlocks(analysis)
+  const { rowToBlockMapping } = useDiff()
   const totalMergedRows = analysis.mergedFile.totalRows
+  
+  // Create a map to assign consistent colors to blocks from all files
+  const blockColorMap = new Map<string, { hex: string; name: string }>()
+  
+  // Populate the block color map by processing all blocks in time order
+  const allBlocksInOrder: Array<{ label: string; blockIndex: number }> = []
+  
+  analysis.originalFiles.forEach((file) => {
+    file.rows.forEach(row => {
+      const blockLabel = rowToBlockMapping.get(`${file.fileIndex}:${row.originalRowIndex}`)
+      if (blockLabel && !allBlocksInOrder.some(b => b.label === blockLabel)) {
+        allBlocksInOrder.push({ label: blockLabel, blockIndex: allBlocksInOrder.length })
+      }
+    })
+  })
+  
+  // Assign colors in order
+  allBlocksInOrder.forEach(({ label }) => {
+    getBlockColor(label, blockColorMap)
+  })
   
   // Debug: log block structure
   console.log('Generated blocks:', blocks.map(b => ({
@@ -379,37 +524,51 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
   
   return (
     <div>
-      <h3 className="text-sm font-medium mb-3">Merged File - Source Blocks</h3>
+      <h3 className="text-sm font-medium mb-3">Merged File - Block Distribution</h3>
       <p className="text-xs text-muted-foreground mb-3">
-        Shows which original file each block of rows came from in the merged output
+        Shows the sequence of blocks from original files as they appear in the merged output, with rainbow colors assigned sequentially
       </p>
       
       {/* Visual bars - one per file */}
-      <div className="space-y-3 mb-3">
+      <div className="space-y-3 mb-4">
         {analysis.originalFiles.map((file, fileIdx) => {
           const color = FILE_COLORS[fileIdx % FILE_COLORS.length]
           return (
             <div key={file.fileIndex} className="flex items-center gap-2">
               <span className="text-xs w-16 text-muted-foreground">File {fileIdx + 1}</span>
-              <div className="flex-1 h-6 bg-muted rounded overflow-hidden flex">
+              <div className="flex-1 h-8 bg-muted rounded overflow-hidden flex">
                 {blocks.map((block, blockIdx) => {
                   const blockWidthPercent = (block.count / totalMergedRows) * 100
                   
                   if (block.sourceFileIndex === fileIdx) {
                     // This block belongs to this file - show it colored
+                    // Get the block label for this range
+                    const blockLabel = file.rows.find(r => 
+                      r.originalRowIndex >= block.originalStartRow && 
+                      r.originalRowIndex <= block.originalEndRow
+                    ) && rowToBlockMapping.get(`${file.fileIndex}:${block.originalStartRow}`)
+                    
+                    const blockColor = blockLabel ? blockColorMap.get(blockLabel) : color
+                    const bgColor = blockColor?.hex || color.hex
+                    
                     return (
                       <div
                         key={blockIdx}
-                        className="h-full relative group cursor-pointer"
+                        className="h-full relative group cursor-pointer flex items-center justify-center"
                         style={{
                           width: `${blockWidthPercent}%`,
-                          backgroundColor: color.hex,
+                          backgroundColor: bgColor,
                           minWidth: blockWidthPercent > 0.5 ? undefined : '2px'
                         }}
-                        title={`File ${fileIdx + 1}: merged rows ${block.mergedStartRow}-${block.mergedEndRow} (${block.count} rows)`}
+                        title={`File ${fileIdx + 1} (${blockLabel || 'unknown'}): merged rows ${block.mergedStartRow}-${block.mergedEndRow} (${block.count} rows)`}
                       >
-                        {blockWidthPercent > 5 && (
-                          <span className="absolute inset-0 flex items-center justify-center text-[9px] text-white font-medium">
+                        {blockWidthPercent > 8 && (
+                          <span className="text-[9px] text-white font-bold text-center px-1" style={{ textShadow: '1px 1px 2px rgba(0,0,0,0.5)' }}>
+                            {blockLabel || `${block.count}`}
+                          </span>
+                        )}
+                        {blockWidthPercent > 4 && blockWidthPercent <= 8 && (
+                          <span className="text-[8px] text-white font-bold" style={{ textShadow: '1px 1px 2px rgba(0,0,0,0.5)' }}>
                             {block.count}
                           </span>
                         )}
@@ -435,7 +594,23 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
         })}
       </div>
       
-      {/* Legend */}
+      {/* Legend - show all blocks with their colors */}
+      <div className="mb-4 p-3 rounded-lg border bg-muted/30">
+        <div className="text-xs font-medium mb-2">Block Color Legend (Sequential by Time)</div>
+        <div className="grid grid-cols-4 gap-2">
+          {Array.from(blockColorMap.entries()).map(([blockLabel, blockColor], idx) => (
+            <div key={blockLabel} className="flex items-center gap-2">
+              <div 
+                className="w-3 h-3 rounded-sm" 
+                style={{ backgroundColor: blockColor.hex }}
+              />
+              <span className="text-xs font-mono">{blockLabel}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      
+      {/* File legend */}
       <div className="flex gap-4 text-xs text-muted-foreground mb-4">
         {analysis.originalFiles.map((file, idx) => {
           const color = FILE_COLORS[idx % FILE_COLORS.length]
@@ -454,12 +629,13 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
       {/* Block details table */}
       <div className="border rounded-lg overflow-hidden">
         <div className="bg-muted/50 px-3 py-2 border-b">
-          <span className="text-xs font-medium">Block Details ({blocks.length} blocks)</span>
+          <span className="text-xs font-medium">Merged File Block Details ({blocks.length} blocks)</span>
         </div>
-        <div className="max-h-48 overflow-y-auto">
+        <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs">
             <thead className="bg-muted/30 sticky top-0">
               <tr className="border-b">
+                <th className="px-3 py-1.5 text-left font-medium">Block</th>
                 <th className="px-3 py-1.5 text-left font-medium">Source</th>
                 <th className="px-3 py-1.5 text-left font-medium">Merged Rows</th>
                 <th className="px-3 py-1.5 text-left font-medium">Original Rows</th>
@@ -474,11 +650,25 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
                 const color = FILE_COLORS[block.sourceFileIndex % FILE_COLORS.length]
                 const sourceFile = analysis.originalFiles[block.sourceFileIndex]
                 const blockRows = sourceFile?.rows.filter(r => r.originalRowIndex >= block.originalStartRow && r.originalRowIndex <= block.originalEndRow) || []
+                const blockLabel = blockRows.length > 0 && rowToBlockMapping.get(`${block.sourceFileIndex}:${blockRows[0].originalRowIndex}`) || '-'
+                const blockColor = blockLabel !== '-' ? blockColorMap.get(blockLabel) : null
                 const startTimestamp = blockRows.length > 0 ? blockRows[0]?.originalTimestamp : '-'
                 const endTimestamp = blockRows.length > 0 ? blockRows[blockRows.length - 1]?.originalTimestamp : '-'
                 
                 return (
                   <tr key={idx} className="border-b hover:bg-muted/30">
+                    <td className="px-3 py-1.5 font-mono">
+                      {blockColor ? (
+                        <div 
+                          className="px-2 py-0.5 rounded text-white text-[10px] font-bold inline-block"
+                          style={{ backgroundColor: blockColor.hex }}
+                        >
+                          {blockLabel}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">{blockLabel}</span>
+                      )}
+                    </td>
                     <td className="px-3 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <div 
