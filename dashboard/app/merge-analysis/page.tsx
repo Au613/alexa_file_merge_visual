@@ -1,13 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { Upload, FileSpreadsheet, X, AlertCircle, CheckCircle, Download } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import * as XLSX from 'xlsx'
+import type { DataRow, DiffAnalysis } from '@/lib/types'
 
 interface UploadedFile {
   id: string
@@ -31,11 +31,141 @@ interface MergeAnalysis {
   mergeMap?: Array<{ fileIndex: number; rowsFromFile: number[] }>
 }
 
-// Rainbow colors for visualization
-const RAINBOW_COLORS = [
-  '#DC143C', '#FF8C00', '#DAA520', '#228B22', '#4169E1', '#6A5ACD',
-  '#9370DB', '#CD5C5C', '#20B2AA', '#8FBC8F', '#B22222', '#6495ED',
-]
+interface SourceFileBlock {
+  sourceFile: string
+  startRowMerged: number
+  endRowMerged: number
+  startTimestamp: string
+  endTimestamp: string
+  rowCount: number
+}
+
+function SourceFileVisualizer({ blocks, mergedRowCount }: { blocks: SourceFileBlock[]; mergedRowCount: number }) {
+  // Get unique colors for each source file
+  const colorMap = new Map<string, string>()
+  const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316']
+  
+  blocks.forEach((block, idx) => {
+    if (!colorMap.has(block.sourceFile)) {
+      colorMap.set(block.sourceFile, colors[colorMap.size % colors.length])
+    }
+  })
+  
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold mb-3">Source File Distribution</h3>
+        <div className="flex gap-0.5 h-12 bg-muted rounded-lg overflow-hidden">
+          {blocks.map((block, idx) => {
+            const percentage = (block.rowCount / mergedRowCount) * 100
+            const color = colorMap.get(block.sourceFile) || '#ccc'
+            return (
+              <div
+                key={idx}
+                className="h-full hover:opacity-75 cursor-pointer transition-opacity relative group"
+                style={{
+                  width: `${percentage}%`,
+                  backgroundColor: color,
+                  minWidth: '2px'
+                }}
+                title={`${block.sourceFile}: Rows ${block.startRowMerged}-${block.endRowMerged}`}
+              >
+                {/* Tooltip */}
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-900 text-white text-xs rounded py-2 px-3 whitespace-nowrap z-10">
+                  <div className="font-semibold">{block.sourceFile}</div>
+                  <div>Rows {block.startRowMerged}-{block.endRowMerged}</div>
+                  <div className="mt-1 pt-1 border-t border-slate-600">
+                    <div>Start: {block.startTimestamp}</div>
+                    <div>End: {block.endTimestamp}</div>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+      
+      {/* Legend */}
+      <div className="space-y-2">
+        <h4 className="text-xs font-semibold text-muted-foreground">Source Files</h4>
+        <div className="space-y-1">
+          {Array.from(new Set(blocks.map(b => b.sourceFile))).map((file) => {
+            const color = colorMap.get(file) || '#ccc'
+            const totalRows = blocks
+              .filter(b => b.sourceFile === file)
+              .reduce((sum, b) => sum + b.rowCount, 0)
+            return (
+              <div key={file} className="flex items-center gap-2 text-xs">
+                <div
+                  className="w-3 h-3 rounded flex-shrink-0"
+                  style={{ backgroundColor: color }}
+                />
+                <span className="text-muted-foreground truncate">{file}</span>
+                <span className="ml-auto text-xs font-medium">{totalRows} rows</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Helper function to convert merge analysis to DiffAnalysis
+function convertToDiffAnalysis(analysis: MergeAnalysis, now: Date): DiffAnalysis {
+  const today = new Date().toISOString().split('T')[0]
+  const displayDate = new Date().toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+
+  return {
+    date: today,
+    displayDate,
+    analyzedAt: now,
+    originalFiles: analysis.originalFiles.map(file => ({
+      fileIndex: file.fileIndex,
+      fileName: file.fileName,
+      totalRows: file.totalRows,
+      keptRows: file.keptRows,
+      excludedRows: file.droppedRows,
+      timestampModifications: 0,
+      rows: [
+        ...file.keptIndices.map((idx, pos) => ({
+          originalRowIndex: idx,
+          sourceFileName: file.fileName,
+          sourceFileIndex: file.fileIndex,
+          subject: '',
+          originalTimestamp: '',
+          behavior: '',
+          status: 'kept' as const,
+          mergedRowIndex: pos,
+          timestampModified: false,
+        })),
+        ...file.droppedIndices.map(idx => ({
+          originalRowIndex: idx,
+          sourceFileName: file.fileName,
+          sourceFileIndex: file.fileIndex,
+          subject: '',
+          originalTimestamp: '',
+          behavior: '',
+          status: 'excluded' as const,
+          mergedRowIndex: undefined,
+          timestampModified: false,
+        })),
+      ] as any[],
+    })),
+    mergedFile: {
+      fileName: 'merged_file.xls',
+      totalRows: analysis.totalMergedRows,
+    },
+    totalOriginalRows: analysis.totalOriginalRows,
+    totalKept: analysis.totalOriginalRows - (analysis.totalOriginalRows - analysis.totalMergedRows),
+    totalExcluded: analysis.totalOriginalRows - analysis.totalMergedRows,
+    totalTimestampModifications: 0,
+  }
+}
 
 export default function MergeAnalysisPage() {
   const [files, setFiles] = useState<UploadedFile[]>([])
@@ -44,6 +174,8 @@ export default function MergeAnalysisPage() {
   const [dragOver, setDragOver] = useState(false)
   const [analysis, setAnalysis] = useState<MergeAnalysis | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [mergedMetadata, setMergedMetadata] = useState<any[][] | null>(null)
+  const [sourceFileBlocks, setSourceFileBlocks] = useState<SourceFileBlock[]>([])
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
@@ -91,6 +223,16 @@ export default function MergeAnalysisPage() {
 
   const downloadFile = async (version: 'standard' | 'withMetadata') => {
     try {
+      // Extract date from first uploaded file name (e.g., "2022.07.07.ff.aldmerge.x.xls" -> "2022.07.07")
+      let datePrefix = new Date().toISOString().split('T')[0].replace(/-/g, '.')
+      if (files.length > 0) {
+        const firstFileName = files[0].name
+        const dateMatch = firstFileName.match(/(\d{4}\.\d{2}\.\d{2})/)
+        if (dateMatch) {
+          datePrefix = dateMatch[1]
+        }
+      }
+
       const response = await fetch(`/api/merge?version=${version}`)
       if (!response.ok) throw new Error('Download failed')
 
@@ -99,8 +241,8 @@ export default function MergeAnalysisPage() {
       const a = document.createElement('a')
       a.href = url
       a.download = version === 'standard' 
-        ? 'merged_file.xls'
-        : 'merged_file_with_metadata.xls'
+        ? `${datePrefix}-merged.xls`
+        : `${datePrefix}-merged-with-metadata.xls`
       document.body.appendChild(a)
       a.click()
       window.URL.revokeObjectURL(url)
@@ -208,12 +350,62 @@ export default function MergeAnalysisPage() {
       const totalOriginalRows = analysisResults.reduce((sum, f) => sum + f.totalRows, 0)
       const totalMergedRows = mergedRows.length - 1 // exclude header
 
-      setAnalysis({
+      const mergeAnalysis: MergeAnalysis = {
         originalFiles: analysisResults,
         totalOriginalRows,
         totalMergedRows,
         mergeMap: mergeData.mergeMap
-      })
+      }
+
+      setAnalysis(mergeAnalysis)
+      setMergedMetadata(mergedRows)
+      
+      // Step 6: Build source file blocks visualization data
+      const blocks: SourceFileBlock[] = []
+      let currentFile: string | null = null
+      let blockStart = 1 // Start from row 1 (skip header in merged file)
+      let blockStartTimestamp = ''
+      
+      for (let i = 1; i < mergedRows.length; i++) {
+        const row = mergedRows[i]
+        const sourceFile = String(row[3] || '')
+        const timestamp = String(row[1] || '')
+        
+        // If source file changes, save previous block and start new one
+        if (sourceFile !== currentFile && currentFile !== null) {
+          blocks.push({
+            sourceFile: currentFile,
+            startRowMerged: blockStart,
+            endRowMerged: i - 1,
+            startTimestamp: blockStartTimestamp,
+            endTimestamp: String(mergedRows[i - 1][1] || ''),
+            rowCount: i - blockStart
+          })
+          blockStart = i
+          blockStartTimestamp = timestamp
+        }
+        
+        if (currentFile === null) {
+          currentFile = sourceFile
+          blockStartTimestamp = timestamp
+        } else {
+          currentFile = sourceFile
+        }
+      }
+      
+      // Add final block
+      if (currentFile !== null) {
+        blocks.push({
+          sourceFile: currentFile,
+          startRowMerged: blockStart,
+          endRowMerged: mergedRows.length - 1,
+          startTimestamp: blockStartTimestamp,
+          endTimestamp: String(mergedRows[mergedRows.length - 1][1] || ''),
+          rowCount: mergedRows.length - blockStart
+        })
+      }
+      
+      setSourceFileBlocks(blocks)
       setSuccess(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to process files')
@@ -351,204 +543,22 @@ export default function MergeAnalysisPage() {
 
       {/* Analysis Results */}
       {analysis && (
-        <div className="space-y-6">
-      {/* Summary Stats */}
-          <Card className="bg-blue-500/5 border-blue-500/20">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Summary</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-3 gap-4">
-                <div className="p-3 rounded-lg border border-blue-500/20">
-                  <p className="text-xs text-muted-foreground mb-1">Total Original Rows</p>
-                  <p className="text-2xl font-semibold">{analysis.totalOriginalRows}</p>
-                </div>
-                <div className="p-3 rounded-lg border border-blue-500/20">
-                  <p className="text-xs text-muted-foreground mb-1">Total Merged Rows</p>
-                  <p className="text-2xl font-semibold">{analysis.totalMergedRows}</p>
-                </div>
-                <div className="p-3 rounded-lg border border-blue-500/20">
-                  <p className="text-xs text-muted-foreground mb-1">Rows Dropped</p>
-                  <p className="text-2xl font-semibold">
-                    {analysis.totalOriginalRows - analysis.totalMergedRows}
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Merged File - Source Blocks Visualization */}
-          {analysis.mergeMap && (
-            <Card className="bg-purple-500/5 border-purple-500/20">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">Merged File - Source Blocks</CardTitle>
-                <CardDescription>
-                  Shows which original file each block of rows came from in the merged output
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-3">
-                  <p className="text-sm font-medium">Merged</p>
-                  <div className="flex gap-0.5 h-8 bg-muted rounded overflow-hidden">
-                    {Array.from({ length: analysis.totalMergedRows }).map((_, mergedIdx) => {
-                      // Find which file this merged position came from
-                      let sourceFileIdx = 0
-                      if (analysis.mergeMap) {
-                        for (let fIdx = 0; fIdx < analysis.mergeMap.length; fIdx++) {
-                          if (analysis.mergeMap[fIdx].rowsFromFile.includes(mergedIdx)) {
-                            sourceFileIdx = fIdx
-                            break
-                          }
-                        }
-                      }
-                      const color = RAINBOW_COLORS[sourceFileIdx % RAINBOW_COLORS.length]
-                      return (
-                        <div
-                          key={mergedIdx}
-                          className="flex-1 h-full transition-all hover:opacity-75"
-                          style={{ backgroundColor: color }}
-                          title={`Row ${mergedIdx + 1} (from File ${sourceFileIdx + 1})`}
-                        />
-                      )
-                    })}
-                  </div>
-                </div>
-
-                {/* Legend */}
-                <div className="p-3 rounded-lg border border-purple-500/20">
-                  <p className="text-xs font-medium mb-2">File Legend</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {analysis.originalFiles.map((file) => (
-                      <div key={file.fileIndex} className="flex items-center gap-2">
-                        <div
-                          className="w-3 h-3 rounded"
-                          style={{ backgroundColor: RAINBOW_COLORS[file.fileIndex % RAINBOW_COLORS.length] }}
-                        />
-                        <span className="text-xs text-muted-foreground">{file.fileName}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Per-File Analysis */}
-          <Tabs defaultValue="overview" className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              <TabsTrigger value="details">Detailed Rows</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="overview" className="space-y-4">
-              {analysis.originalFiles.map((file) => {
-                const keptPercent = file.totalRows > 0 ? (file.keptRows / file.totalRows) * 100 : 0
-                const color = RAINBOW_COLORS[file.fileIndex % RAINBOW_COLORS.length]
-
-                return (
-                  <Card key={file.fileIndex}>
-                    <CardHeader className="pb-3">
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-base flex items-center gap-2">
-                          <div
-                            className="w-3 h-3 rounded"
-                            style={{ backgroundColor: color }}
-                          />
-                          {file.fileName}
-                        </CardTitle>
-                        <Badge variant="outline">
-                          {file.keptRows} / {file.totalRows} rows kept
-                        </Badge>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">Kept</span>
-                          <span className="font-medium">{file.keptRows}</span>
-                        </div>
-                        <div className="h-2 bg-muted rounded overflow-hidden">
-                          <div
-                            className="h-full bg-green-500 transition-all"
-                            style={{ width: `${keptPercent}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-sm">
-                          <span className="text-muted-foreground">Dropped</span>
-                          <span className="font-medium">{file.droppedRows}</span>
-                        </div>
-                        <div className="h-2 bg-muted rounded overflow-hidden">
-                          <div
-                            className="h-full bg-red-500 transition-all"
-                            style={{ width: `${100 - keptPercent}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="text-xs text-muted-foreground pt-2">
-                        {keptPercent.toFixed(1)}% of rows from this file were included in the merge
-                      </div>
-                    </CardContent>
-                  </Card>
-                )
-              })}
-            </TabsContent>
-
-            <TabsContent value="details" className="space-y-4">
-              {analysis.originalFiles.map((file) => (
-                <Card key={file.fileIndex}>
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-base">{file.fileName}</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    {/* Kept Rows */}
-                    <div>
-                      <h4 className="text-sm font-medium mb-2 text-green-700">
-                        Kept Rows ({file.keptRows})
-                      </h4>
-                      <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3 max-h-48 overflow-y-auto">
-                        {file.keptIndices.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {file.keptIndices.map((idx) => (
-                              <Badge key={idx} variant="secondary" className="bg-green-500/20 text-green-700 border-green-500/30">
-                                Row {idx}
-                              </Badge>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">No rows kept</p>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Dropped Rows */}
-                    <div>
-                      <h4 className="text-sm font-medium mb-2 text-red-700">
-                        Dropped Rows ({file.droppedRows})
-                      </h4>
-                      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 max-h-48 overflow-y-auto">
-                        {file.droppedIndices.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {file.droppedIndices.map((idx) => (
-                              <Badge key={idx} variant="secondary" className="bg-red-500/20 text-red-700 border-red-500/30">
-                                Row {idx}
-                              </Badge>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">No rows dropped</p>
-                        )}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </TabsContent>
-          </Tabs>
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Merge Analysis Results</CardTitle>
+            <CardDescription>
+              Visual breakdown of which source files appear in the merged output
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {sourceFileBlocks.length > 0 && (
+              <SourceFileVisualizer 
+                blocks={sourceFileBlocks} 
+                mergedRowCount={analysis.totalMergedRows}
+              />
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Download Section */}
@@ -560,45 +570,43 @@ export default function MergeAnalysisPage() {
               Download the final merged output in two formats
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="p-3 rounded-lg border border-green-500/20">
-              <div className="flex items-start justify-between mb-2">
-                <div>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-3 rounded-lg border border-green-500/20">
+                <div className="mb-3">
                   <p className="font-medium text-sm">Standard Version</p>
                   <p className="text-xs text-muted-foreground">
-                    Merged data without metadata columns
+                    Without metadata
                   </p>
                 </div>
+                <Button
+                  onClick={() => downloadFile('standard')}
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Download
+                </Button>
               </div>
-              <Button
-                onClick={() => downloadFile('standard')}
-                variant="outline"
-                size="sm"
-                className="w-full"
-              >
-                <Download className="w-4 h-4 mr-2" />
-                Download Standard
-              </Button>
-            </div>
 
-            <div className="p-3 rounded-lg border border-green-500/20">
-              <div className="flex items-start justify-between mb-2">
-                <div>
+              <div className="p-3 rounded-lg border border-green-500/20">
+                <div className="mb-3">
                   <p className="font-medium text-sm">With Metadata</p>
                   <p className="text-xs text-muted-foreground">
-                    Includes source file name and original row number
+                    Includes source file info
                   </p>
                 </div>
+                <Button
+                  onClick={() => downloadFile('withMetadata')}
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Download
+                </Button>
               </div>
-              <Button
-                onClick={() => downloadFile('withMetadata')}
-                variant="outline"
-                size="sm"
-                className="w-full"
-              >
-                <Download className="w-4 h-4 mr-2" />
-                Download With Metadata
-              </Button>
             </div>
           </CardContent>
         </Card>
