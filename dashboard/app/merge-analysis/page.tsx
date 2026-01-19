@@ -176,6 +176,7 @@ export default function MergeAnalysisPage() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [mergedMetadata, setMergedMetadata] = useState<any[][] | null>(null)
   const [sourceFileBlocks, setSourceFileBlocks] = useState<SourceFileBlock[]>([])
+  const [droppedRowsData, setDroppedRowsData] = useState<any[][] | null>(null)
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
@@ -223,7 +224,12 @@ export default function MergeAnalysisPage() {
 
   const downloadFile = async (version: 'standard' | 'withMetadata') => {
     try {
-      // Extract date from first uploaded file name (e.g., "2022.07.07.ff.aldmerge.x.xls" -> "2022.07.07")
+      if (!mergedMetadata || typeof mergedMetadata !== 'object' || !('standard' in mergedMetadata)) {
+        setError('Merged file data not available')
+        return
+      }
+
+      // Extract date from first uploaded file name
       let datePrefix = new Date().toISOString().split('T')[0].replace(/-/g, '.')
       if (files.length > 0) {
         const firstFileName = files[0].name
@@ -233,10 +239,19 @@ export default function MergeAnalysisPage() {
         }
       }
 
-      const response = await fetch(`/api/merge?version=${version}`)
-      if (!response.ok) throw new Error('Download failed')
+      const base64Data = version === 'standard' 
+        ? (mergedMetadata as any).standard
+        : (mergedMetadata as any).metadata
 
-      const blob = await response.blob()
+      // Decode base64 to binary
+      const binaryString = atob(base64Data)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+
+      // Create blob and download
+      const blob = new Blob([bytes], { type: 'application/vnd.ms-excel' })
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -249,6 +264,35 @@ export default function MergeAnalysisPage() {
       document.body.removeChild(a)
     } catch (err) {
       setError('Failed to download file')
+    }
+  }
+
+  const downloadDroppedRows = () => {
+    try {
+      if (!droppedRowsData || droppedRowsData.length === 0) {
+        setError('No dropped rows to download')
+        return
+      }
+
+      // Extract date from first uploaded file name
+      let datePrefix = new Date().toISOString().split('T')[0].replace(/-/g, '.')
+      if (files.length > 0) {
+        const firstFileName = files[0].name
+        const dateMatch = firstFileName.match(/(\d{4}\.\d{2}\.\d{2})/)
+        if (dateMatch) {
+          datePrefix = dateMatch[1]
+        }
+      }
+
+      // Create a new workbook with the dropped rows
+      const worksheet = XLSX.utils.aoa_to_sheet(droppedRowsData)
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Dropped Rows')
+      
+      // Download the file
+      XLSX.writeFile(workbook, `${datePrefix}-dropped-rows.xls`)
+    } catch (err) {
+      setError('Failed to download dropped rows file')
     }
   }
 
@@ -282,7 +326,7 @@ export default function MergeAnalysisPage() {
         originalData.push({ fileName: file.name, rows })
       }
 
-      // Step 2: Send to merge API
+      // Step 2: Send to merge API (new per-date structure)
       const formData = new FormData()
       files.forEach(f => {
         formData.append('files', f.file)
@@ -299,17 +343,25 @@ export default function MergeAnalysisPage() {
 
       const mergeData = await mergeResponse.json()
 
-      // Step 3: Get the merged metadata file
-      const downloadResponse = await fetch('/api/merge?version=withMetadata')
-      if (!downloadResponse.ok) {
-        throw new Error('Failed to retrieve merged metadata')
+      // Step 3: Use the first result (for the primary date)
+      if (!mergeData.results || mergeData.results.length === 0) {
+        throw new Error('No merge results returned')
       }
 
-      const mergedBuffer = await downloadResponse.arrayBuffer()
+      const primaryResult = mergeData.results[0]
+      
+      // Decode the metadata buffer from base64
+      const metaBufBase64 = primaryResult.withMetadataBase64
+      const binaryString = atob(metaBufBase64)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      const mergedBuffer = bytes.buffer as ArrayBuffer
       const mergedRows = parseExcelFile(Buffer.from(mergedBuffer))
 
-      // Step 4: Build source map from merged file (columns: Author, DateTime, Data, Source File, Original Row #)
-      const sourceMap = new Map<string, Set<number>>() // key: "filename|rowNum"
+      // Step 4: Build source map from merged file
+      const sourceMap = new Map<string, Set<number>>()
 
       for (let i = 1; i < mergedRows.length; i++) {
         const row = mergedRows[i]
@@ -317,7 +369,7 @@ export default function MergeAnalysisPage() {
           const sourceFile = String(row[3])
           const originalRowNum = row[4]
           const key = `${sourceFile}|${originalRowNum}`
-          sourceMap.set(key, new Set([i - 1])) // i-1 because we skip header
+          sourceMap.set(key, new Set([i - 1]))
         }
       }
 
@@ -339,7 +391,7 @@ export default function MergeAnalysisPage() {
         return {
           fileIndex: fileIdx,
           fileName: data.fileName,
-          totalRows: data.rows.length - 1, // exclude header
+          totalRows: data.rows.length - 1,
           keptRows: keptIndices.length,
           droppedRows: droppedIndices.length,
           keptIndices,
@@ -348,13 +400,13 @@ export default function MergeAnalysisPage() {
       })
 
       const totalOriginalRows = analysisResults.reduce((sum, f) => sum + f.totalRows, 0)
-      const totalMergedRows = mergedRows.length - 1 // exclude header
+      const totalMergedRows = mergedRows.length - 1
 
       const mergeAnalysis: MergeAnalysis = {
         originalFiles: analysisResults,
         totalOriginalRows,
         totalMergedRows,
-        mergeMap: mergeData.mergeMap
+        mergeMap: undefined
       }
 
       setAnalysis(mergeAnalysis)
@@ -363,7 +415,7 @@ export default function MergeAnalysisPage() {
       // Step 6: Build source file blocks visualization data
       const blocks: SourceFileBlock[] = []
       let currentFile: string | null = null
-      let blockStart = 1 // Start from row 1 (skip header in merged file)
+      let blockStart = 1
       let blockStartTimestamp = ''
       
       for (let i = 1; i < mergedRows.length; i++) {
@@ -371,7 +423,6 @@ export default function MergeAnalysisPage() {
         const sourceFile = String(row[3] || '')
         const timestamp = String(row[1] || '')
         
-        // If source file changes, save previous block and start new one
         if (sourceFile !== currentFile && currentFile !== null) {
           blocks.push({
             sourceFile: currentFile,
@@ -393,7 +444,6 @@ export default function MergeAnalysisPage() {
         }
       }
       
-      // Add final block
       if (currentFile !== null) {
         blocks.push({
           sourceFile: currentFile,
@@ -406,6 +456,38 @@ export default function MergeAnalysisPage() {
       }
       
       setSourceFileBlocks(blocks)
+      
+      // Step 7: Build dropped rows data for export
+      const droppedRows: any[][] = [
+        ['Row Data (Author)', 'DateTime', 'Data', 'Source File', 'Original Row Number']
+      ]
+      
+      analysisResults.forEach((fileAnalysis) => {
+        const originalFile = originalData[fileAnalysis.fileIndex]
+        if (!originalFile) return
+        
+        fileAnalysis.droppedIndices.forEach((rowIdx) => {
+          const row = originalFile.rows[rowIdx]
+          if (row) {
+            droppedRows.push([
+              String(row[0] || ''),
+              String(row[1] || ''),
+              String(row[2] || ''),
+              fileAnalysis.fileName,
+              rowIdx
+            ])
+          }
+        })
+      })
+      
+      setDroppedRowsData(droppedRows)
+      
+      // Store the base64 buffers for download
+      setMergedMetadata({
+        standard: primaryResult.standardBase64,
+        metadata: primaryResult.withMetadataBase64
+      } as any)
+      
       setSuccess(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to process files')
@@ -571,7 +653,7 @@ export default function MergeAnalysisPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 mb-4">
               <div className="p-3 rounded-lg border border-green-500/20">
                 <div className="mb-3">
                   <p className="font-medium text-sm">Standard Version</p>
@@ -608,6 +690,26 @@ export default function MergeAnalysisPage() {
                 </Button>
               </div>
             </div>
+
+            {droppedRowsData && droppedRowsData.length > 1 && (
+              <>
+                <div className="border-t pt-4 mt-4">
+                  <h3 className="text-sm font-semibold mb-3">Excluded Rows</h3>
+                  <p className="text-xs text-muted-foreground mb-3">
+                    Download the {droppedRowsData.length - 1} rows that were excluded from the merge
+                  </p>
+                  <Button
+                    onClick={downloadDroppedRows}
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Download Excluded Rows
+                  </Button>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       )}

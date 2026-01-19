@@ -1,21 +1,32 @@
-import { NextRequest, NextResponse } from 'next/server'
-import * as XLSX from 'xlsx'
+import { NextRequest, NextResponse } from "next/server"
+import * as XLSX from "xlsx"
 
-interface CachedMergeData {
-  standard: any[][]
-  withMetadata: any[][]
-  mergeMap: Array<{ fileIndex: number; rowsFromFile: number[] }>
+type Partition = {
+  startIndex: number
+  endIndex: number
+  startDateTime: string
+  endDateTime: string
+  sourceFile: string
+  dateKey: string
 }
 
-interface RowWithMetadata {
+type CommentRow = {
+  index: number
+  sourceFile: string
+  datetime: string
+  author: string
+  data: string
+  dateKey: string
+}
+
+type Row = {
   author: string
   datetime: string
   data: string
   sourceFile: string
   originalRowIndex: number
+  dateKey: string
 }
-
-let cachedMergedFiles: CachedMergeData | null = null
 
 function excelDateToJSDate(serial: number): Date {
   const utcDays = Math.floor(serial - 25569)
@@ -26,240 +37,417 @@ function excelDateToJSDate(serial: number): Date {
 }
 
 function formatIsoDate(isoDate: string | Date): string {
-  const date = typeof isoDate === 'string' ? new Date(isoDate) : isoDate
-  const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const dd = String(date.getUTCDate()).padStart(2, '0')
+  const date = typeof isoDate === "string" ? new Date(isoDate) : isoDate
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0")
+  const dd = String(date.getUTCDate()).padStart(2, "0")
   const yyyy = date.getUTCFullYear()
   const hh = date.getUTCHours()
-  const min = String(date.getUTCMinutes()).padStart(2, '0')
-  const sec = String(date.getUTCSeconds()).padStart(2, '0')
+  const min = String(date.getUTCMinutes()).padStart(2, "0")
+  const sec = String(date.getUTCSeconds()).padStart(2, "0")
   return `${mm}/${dd}/${yyyy} ${hh}:${min}:${sec}`
 }
 
-function findFocalFollowSections(data: any[][]): Array<{ startIndex: number; endIndex: number }> {
-  const sections: Array<{ startIndex: number; endIndex: number }> = []
-  
-  for (let i = 0; i < data.length; i++) {
-    const row = data[i]
-    if (row[2] && String(row[2]).startsWith('F:')) {
-      // Found focal follow start
-      for (let j = i + 1; j < data.length; j++) {
-        if (data[j][2] && String(data[j][2]).toLowerCase().startsWith('end')) {
-          sections.push({ startIndex: i, endIndex: j })
-          i = j
-          break
-        }
-      }
-    }
-  }
-  
-  return sections
+function parseExcelFile(buffer: Buffer): any[][] {
+  const workbook = XLSX.read(buffer, { type: "buffer" })
+  const sheetName = workbook.SheetNames[0]
+  const worksheet = workbook.Sheets[sheetName]
+  return XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: null }) as any[][]
 }
 
-function extractComments(data: RowWithMetadata[]): RowWithMetadata[] {
-  return data.filter(row => row.data.startsWith('C:'))
+function extractDateKey(fileName: string): string | null {
+  const match = fileName.match(/^(\d{4}\.\d{2}\.\d{2})/)
+  return match ? match[1] : null
 }
 
-function removeRowsByIndices(data: RowWithMetadata[], indices: Set<number>): RowWithMetadata[] {
-  return data.filter((_, idx) => !indices.has(idx))
-}
-
-function findLostFocal(data: RowWithMetadata[]): Set<number> {
-  const lostIndices = new Set<number>()
-  for (let i = 0; i < data.length; i++) {
-    if (String(data[i].data).toLowerCase().includes('lost focal')) {
-      lostIndices.add(i)
-    }
-  }
-  return lostIndices
-}
-
-function sortByDateTime(data: RowWithMetadata[]): RowWithMetadata[] {
-  return [...data].sort((a, b) => {
-    try {
-      const dateA = new Date(a.datetime)
-      const dateB = new Date(b.datetime)
-      return dateA.getTime() - dateB.getTime()
-    } catch {
-      return 0
+/** Mirrors readXlsToJson(): row[0]=author, row[1]=excel serial, row[2]=data */
+function sheetToRows(sheet: any[][], sourceFile: string): Row[] {
+  return sheet.map((row, idx) => {
+    const author = String(row?.[0] ?? "")
+    const rawDate = row?.[1]
+    const datetime =
+      typeof rawDate === "number" ? formatIsoDate(excelDateToJSDate(rawDate)) : String(rawDate ?? "")
+    const data = String(row?.[2] ?? "")
+    const dateKey = extractDateKey(sourceFile) ?? "unknown"
+    return {
+      author,
+      datetime,
+      data,
+      sourceFile,
+      originalRowIndex: idx,
+      dateKey,
     }
   })
 }
 
-function parseExcelFile(buffer: Buffer): any[][] {
-  const workbook = XLSX.read(buffer, { type: 'buffer' })
-  const sheetName = workbook.SheetNames[0]
-  const worksheet = workbook.Sheets[sheetName]
-  return XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][]
+/** === Partition logic copied from readExcel.js semantics === */
+
+function helper_findPartitions_from_F_to_END(rows: Row[]): Array<{ startIndex: number; endIndex: number }> {
+  const starts = rows
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r.data && r.data.startsWith("F:"))
+  const ends = rows
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r.data && String(r.data).toLowerCase().startsWith("end"))
+
+  let prev_end: number | null = null
+  const partitions: Array<{ startIndex: number; endIndex: number }> = []
+
+  let endPtr = 0
+  for (let i = 0; i < starts.length; i++) {
+    const start = starts[i]
+    if (prev_end !== null && start.i < prev_end) continue
+
+    while (endPtr < ends.length) {
+      const end = ends[endPtr]
+      if (end.i < start.i) {
+        endPtr++
+        continue
+      }
+
+      partitions.push({ startIndex: start.i, endIndex: end.i })
+      prev_end = end.i
+      endPtr++
+      break
+    }
+  }
+  return partitions
 }
 
-export async function POST(request: NextRequest) {
+function helper_comments_afterStartAndBeforeFirstPartition(
+  focal: Array<{ startIndex: number; endIndex: number }>,
+  rows: Row[],
+  sourceFile: string
+): CommentRow[] {
+  if (focal.length === 0) return []
+  const first = focal[0]
+  const newStartIndex = 5
+  const newEndIndex = first.startIndex - 1
+  return rows
+    .slice(newStartIndex, newEndIndex)
+    .map((r, offset) => ({
+      index: newStartIndex + offset,
+      sourceFile,
+      datetime: r.datetime,
+      author: r.author,
+      data: r.data,
+      dateKey: r.dateKey,
+    }))
+    .filter((c) => c.data?.startsWith("C")) // NOTE: matches readExcel.js (startsWith("C"), not "C:")
+}
+
+function helper_getCommentsAfterEnd_partitions(
+  focal: Array<{ startIndex: number; endIndex: number }>,
+  rows: Row[],
+  sourceFile: string
+): CommentRow[] {
+  if (focal.length === 0) {
+    return rows
+      .map((r, idx) =>
+        r.data?.startsWith("C")
+          ? { index: idx, sourceFile, datetime: r.datetime, author: r.author, data: r.data, dateKey: r.dateKey }
+          : null
+      )
+      .filter((x): x is CommentRow => x !== null)
+  }
+
+  const lastEnd = focal[focal.length - 1].endIndex + 1
+  if (rows.length <= lastEnd) return []
+
+  const out: CommentRow[] = []
+  for (let i = lastEnd; i < rows.length; i++) {
+    const r = rows[i]
+    if (!r || !r.data) continue
+    if (r.data.startsWith("C")) {
+      out.push({ index: i, sourceFile, datetime: r.datetime, author: r.author, data: r.data, dateKey: r.dateKey })
+    }
+  }
+  return out
+}
+
+function helper_findGaps(focal: Array<{ startIndex: number; endIndex: number }>) {
+  const gaps: Array<{ previousPartitionEndIndex: number; nextPartitionStartIndex: number }> = []
+  for (let i = 0; i < focal.length - 1; i++) {
+    const currentEnd = focal[i].endIndex
+    const nextStart = focal[i + 1].startIndex
+    if (nextStart > currentEnd + 1) {
+      gaps.push({ previousPartitionEndIndex: currentEnd, nextPartitionStartIndex: nextStart })
+    }
+  }
+  return gaps
+}
+
+function helper_findGapComments(
+  focal: Array<{ startIndex: number; endIndex: number }>,
+  rows: Row[],
+  sourceFile: string
+): { gapPartitions: CommentRow[]; notIncluded: CommentRow[] } {
+  const gaps = helper_findGaps(focal)
+  const gapPartitions: CommentRow[] = []
+  const notIncluded: CommentRow[] = []
+
+  gaps.forEach((gap) => {
+    const slice = rows.slice(gap.previousPartitionEndIndex + 1, gap.nextPartitionStartIndex)
+    for (let i = 0; i < slice.length; i++) {
+      const actualIndex = gap.previousPartitionEndIndex + 1 + i
+      const r = slice[i]
+      const entry = {
+        index: actualIndex,
+        sourceFile,
+        datetime: r.datetime,
+        author: r.author,
+        data: r.data,
+        dateKey: r.dateKey,
+      }
+      if (r.data?.startsWith("C")) gapPartitions.push(entry)
+      else notIncluded.push(entry)
+    }
+  })
+
+  return { gapPartitions, notIncluded }
+}
+
+function getFilePartitions(rows: Row[], sourceFile: string): {
+  startPartition: Partition
+  focalPartitions: Partition[]
+  all_nonFFComments: CommentRow[]
+} {
+  const focalRaw = helper_findPartitions_from_F_to_END(rows)
+
+  const startPartition: Partition = {
+    startIndex: 0,
+    endIndex: 4,
+    startDateTime: rows[0]?.datetime ?? "",
+    endDateTime: rows[4]?.datetime ?? "",
+    sourceFile,
+    dateKey: rows[0]?.dateKey ?? extractDateKey(sourceFile) ?? "unknown",
+  }
+
+  const focalPartitions: Partition[] = focalRaw.map((p) => ({
+    startIndex: p.startIndex,
+    endIndex: p.endIndex,
+    startDateTime: rows[p.startIndex]?.datetime ?? "",
+    endDateTime: rows[p.endIndex]?.datetime ?? "",
+    sourceFile,
+    dateKey: rows[0]?.dateKey ?? extractDateKey(sourceFile) ?? "unknown",
+  }))
+
+  const initialComments = helper_comments_afterStartAndBeforeFirstPartition(focalRaw, rows, sourceFile)
+  const afterComments = helper_getCommentsAfterEnd_partitions(focalRaw, rows, sourceFile)
+  const { gapPartitions } = helper_findGapComments(focalRaw, rows, sourceFile)
+
+  const all_nonFFComments = [...initialComments, ...afterComments, ...gapPartitions]
+  return { startPartition, focalPartitions, all_nonFFComments }
+}
+
+function sortByStartDateTimePartitions(arr: Partition[]) {
+  return [...arr].sort((a, b) => new Date(a.startDateTime).getTime() - new Date(b.startDateTime).getTime())
+}
+
+function getTimeDiff(dateString1: string, dateString2: string) {
+  const d1 = new Date(dateString1)
+  const d2 = new Date(dateString2)
+  return d2.getTime() - d1.getTime()
+}
+
+function helper_adjustPartitionArrayTimes(arr: Partition[]): Partition[] {
+  let prev: Partition | null = null
+  const out: Partition[] = []
+
+  for (const p of arr) {
+    if (!prev) {
+      out.push(p)
+      prev = p
+      continue
+    }
+    const fiveMinutes = 310000
+    const prevEnd = new Date(prev.endDateTime)
+    const curStart = new Date(p.startDateTime)
+    const timeDiff = getTimeDiff(prev.endDateTime, p.startDateTime)
+    const timeAdjustment = 1000
+    const totalAdjustment = -timeDiff + timeAdjustment
+
+    if (timeDiff > fiveMinutes) {
+      out.push(p)
+    } else {
+      const newStart = formatIsoDate(new Date(curStart.getTime() + totalAdjustment))
+      const newEnd = formatIsoDate(new Date(new Date(p.endDateTime).getTime() + totalAdjustment))
+      out.push({ ...p, startDateTime: newStart, endDateTime: newEnd })
+    }
+    prev = p
+  }
+  return out
+}
+
+function sortByDateTimeRows(data: any[][]) {
+  return [...data].sort((a, b) => new Date(a[1]).getTime() - new Date(b[1]).getTime())
+}
+
+/** === Same as readExcel.js === */
+function splitByKeys(mainArray: Array<Record<number, any>>, dividerKeys: Array<Record<number, any>>) {
+  const sortedDividers = dividerKeys.map((obj) => Object.keys(obj)[0]).sort((a, b) => Number(a) - Number(b))
+  const sortedMain = [...mainArray].sort((a, b) => Number(Object.keys(a)[0]) - Number(Object.keys(b)[0]))
+
+  const result: Array<Array<Record<number, any>>> = []
+  let currentGroup: Array<Record<number, any>> = []
+  let dividerIndex = 0
+
+  for (const item of sortedMain) {
+    const key = Object.keys(item)[0]
+    while (dividerIndex < sortedDividers.length && Number(key) >= Number(sortedDividers[dividerIndex])) {
+      result.push(currentGroup)
+      currentGroup = []
+      dividerIndex++
+    }
+    currentGroup.push(item)
+  }
+
+  if (currentGroup.length > 0) result.push(currentGroup)
+  return result
+}
+
+function makeOneContinuousFocalFollow(data: any[][]) {
+  const dataCol = 2
+  const F_starts: Array<Record<number, any>> = []
+  const ends: Array<Record<number, any>> = []
+  const losts: Array<Record<number, any>> = []
+
+  data.forEach((row, index) => {
+    if (!row || !row[dataCol] || String(row[dataCol]).trim() === "") return
+    const v = String(row[dataCol])
+    if (v.startsWith("F:")) F_starts.push({ [index]: row })
+    else if (v.toLowerCase().startsWith("end")) ends.push({ [index]: row })
+    else if (v.toLowerCase().startsWith("c lost focal")) losts.push({ [index]: row })
+  })
+
+  const startSplits = splitByKeys(F_starts, losts)
+  const endSplits = splitByKeys(ends, losts)
+
+  const removeStarts = startSplits.map((g) => g.slice(1).map((obj) => Object.keys(obj)[0]))
+  const removeEnds = endSplits.map((g) => g.slice(0, -1).map((obj) => Object.keys(obj)[0]))
+  const removeRowIndexes = [...removeStarts.flat(), ...removeEnds.flat()].map((el) => parseInt(el, 10))
+
+  return data.filter((_, idx) => !removeRowIndexes.includes(idx))
+}
+
+function buildXlsBuffer(data: any[][]): Buffer {
+  const workbook = XLSX.utils.book_new()
+  const sheet = XLSX.utils.aoa_to_sheet(data)
+  XLSX.utils.book_append_sheet(workbook, sheet, "Sheet1")
+  return XLSX.write(workbook, { type: "buffer", bookType: "xls" }) as Buffer
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const formData = await request.formData()
-    const files = formData.getAll('files') as File[]
+    const formData = await req.formData()
+    const files = formData.getAll("files") as File[]
 
-    if (!files || files.length === 0) {
-      return NextResponse.json({ error: 'No files provided' }, { status: 400 })
+    if (!files?.length) {
+      return NextResponse.json({ error: "No files provided" }, { status: 400 })
     }
 
-    // Parse all files and format data, tracking source file and original row
-    interface RowWithMetadata {
-      author: string
-      datetime: string
-      data: string
-      sourceFile: string
-      originalRowIndex: number
+    // 1) Parse each file -> rows
+    const perFile: Array<{ file: File; rows: Row[]; sheet: any[][] }> = []
+    for (const file of files) {
+      const ab = await file.arrayBuffer()
+      const sheet = parseExcelFile(Buffer.from(ab))
+      const rows = sheetToRows(sheet, file.name)
+      perFile.push({ file, rows, sheet })
     }
 
-    let allData: RowWithMetadata[] = []
-    const mergeMap: Array<{ fileIndex: number; rowsFromFile: number[] }> = files.map((_, idx) => ({
-      fileIndex: idx,
-      rowsFromFile: []
-    }))
+    // 2) Group files by dateKey (like groupFilesByDate)
+    const byDate = new Map<string, Array<{ file: File; rows: Row[]; sheet: any[][] }>>()
+    for (const item of perFile) {
+      const dateKey = extractDateKey(item.file.name)
+      if (!dateKey) continue // matches readExcel behavior: only files with prefix are grouped
+      if (!byDate.has(dateKey)) byDate.set(dateKey, [])
+      byDate.get(dateKey)!.push(item)
+    }
 
-    let mergeCounter = 0
+    const results: Array<{
+      date: string
+      standardFileName: string
+      standardBase64: string
+      withMetadataFileName: string
+      withMetadataBase64: string
+      stats: { files: number; rows: number }
+    }> = []
 
-    for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
-      const file = files[fileIdx]
-      const buffer = await file.arrayBuffer()
-      const rows = parseExcelFile(Buffer.from(buffer))
+    // 3) For each date, replicate master() -> partitionsToFile() -> writeFile_helper()
+    for (const [date, items] of byDate.entries()) {
+      // gather partitions + comments from all files for that date
+      const allFocal: Partition[] = []
+      const allStart: Partition[] = []
+      const allComments: CommentRow[] = []
 
-      // Format rows (convert Excel dates to readable format)
-      const formattedRows = rows.slice(1).map((row, idx) => {
-        const date = typeof row[1] === 'number' 
-          ? formatIsoDate(excelDateToJSDate(row[1]))
-          : String(row[1] || '')
-        return {
-          author: String(row[0] || ''),
-          datetime: date,
-          data: String(row[2] || ''),
-          sourceFile: file.name,
-          originalRowIndex: idx + 1 // +1 because header is row 0
-        }
+      // Cache raw sheet rows by file like readExcel.js does (fileData_json)
+      const sheetByFile = new Map<string, any[][]>()
+
+      for (const it of items) {
+        sheetByFile.set(it.file.name, it.sheet)
+
+        const { startPartition, focalPartitions, all_nonFFComments } = getFilePartitions(it.rows, it.file.name)
+        allStart.push(startPartition)
+        allFocal.push(...focalPartitions)
+        allComments.push(...all_nonFFComments)
+      }
+
+      // sort partitions + adjust time
+      const sortedFocal = sortByStartDateTimePartitions(allFocal)
+      const adjustedFocal = helper_adjustPartitionArrayTimes(sortedFocal)
+
+      // NOTE: readExcel uses only the FIRST startPartition for the date
+      const datePartitionArray: Partition[] = [allStart[0], ...adjustedFocal]
+
+      // extract partition rows from original sheet (like writeFile_helper)
+      let combinedData: any[][] = []
+      for (const p of datePartitionArray) {
+        const sheet = sheetByFile.get(p.sourceFile)
+        if (!sheet) continue
+        const extracted = sheet.slice(p.startIndex, p.endIndex + 1)
+        combinedData.push(...extracted)
+      }
+
+      // format datetime column like readExcel: [author, formattedDate, data]
+      combinedData = combinedData.map((r) => [r?.[0] ?? "", formatIsoDate(excelDateToJSDate(r?.[1])), r?.[2] ?? ""])
+
+      // add comments rows
+      const commentsRows = allComments.map((c) => [c.author, c.datetime, c.data])
+      combinedData = [...combinedData, ...commentsRows]
+
+      // sort, continuous focal follow, correct mistakes
+      combinedData = sortByDateTimeRows(combinedData)
+      combinedData = makeOneContinuousFocalFollow(combinedData)
+
+      // build standard + metadata
+      const standardWithHeader = [["Author", "DateTime", "Data"], ...combinedData]
+      const meta = combinedData.map((r) => {
+        // metadata isn't in readExcel output; we keep it optional but aligned
+        return [r[0], r[1], r[2], "(multiple)", "(n/a)"]
       })
+      const metadataWithHeader = [["Author", "DateTime", "Data", "Source File", "Original Row #"], ...meta]
 
-      // Add to combined data and track merge order
-      for (let rowIdx = 0; rowIdx < formattedRows.length; rowIdx++) {
-        allData.push(formattedRows[rowIdx])
-        mergeMap[fileIdx].rowsFromFile.push(mergeCounter)
-        mergeCounter++
-      }
-    }
+      const standardBuf = buildXlsBuffer(standardWithHeader)
+      const metaBuf = buildXlsBuffer(metadataWithHeader)
 
-    // Apply focal follow merging logic
-    const focalSections = findFocalFollowSections(allData.map(r => [r.author, r.datetime, r.data]))
-    const commentsIndices = new Set<number>()
-    const lostFocalIndices = new Set<number>()
-
-    // Find comment and lost focal rows
-    for (let i = 0; i < allData.length; i++) {
-      const row = allData[i]
-      if (row.data.startsWith('C:')) {
-        commentsIndices.add(i)
-      } else if (row.data.toLowerCase().includes('lost focal')) {
-        lostFocalIndices.add(i)
-      }
-    }
-
-    // Remove lost focal entries
-    const filteredData = allData.filter((_, idx) => !lostFocalIndices.has(idx))
-
-    // Recalculate merge map after removing lost focal entries
-    const newMergeMap: Array<{ fileIndex: number; rowsFromFile: number[] }> = files.map((_, idx) => ({
-      fileIndex: idx,
-      rowsFromFile: []
-    }))
-
-    let newMergeCounter = 0
-    for (let i = 0; i < filteredData.length; i++) {
-      const row = filteredData[i]
-      // Find which file this row came from
-      for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
-        if (row.sourceFile === files[fileIdx].name) {
-          newMergeMap[fileIdx].rowsFromFile.push(newMergeCounter)
-          break
-        }
-      }
-      newMergeCounter++
-    }
-
-    // Sort by datetime
-    filteredData.sort((a, b) => {
-      try {
-        const dateA = new Date(a.datetime)
-        const dateB = new Date(b.datetime)
-        return dateA.getTime() - dateB.getTime()
-      } catch {
-        return 0
-      }
-    })
-
-    // Create standard and metadata versions
-    const mergedStandard = filteredData.map(row => [row.author, row.datetime, row.data])
-    const mergedWithMetadata = filteredData.map(row => [row.author, row.datetime, row.data, row.sourceFile, row.originalRowIndex])
-
-    // Add headers
-    const standardWithHeader = [['Author', 'DateTime', 'Data'], ...mergedStandard]
-    const metadataWithHeader = [
-      ['Author', 'DateTime', 'Data', 'Source File', 'Original Row #'],
-      ...mergedWithMetadata
-    ]
-
-    // Cache results
-    cachedMergedFiles = {
-      standard: standardWithHeader,
-      withMetadata: metadataWithHeader,
-      mergeMap: newMergeMap
+      results.push({
+        date,
+        standardFileName: `${date}.xls`,
+        standardBase64: standardBuf.toString("base64"),
+        withMetadataFileName: `${date}_with_metadata.xls`,
+        withMetadataBase64: metaBuf.toString("base64"),
+        stats: { files: items.length, rows: combinedData.length },
+      })
     }
 
     return NextResponse.json({
-      standard: 'merged_file.xls',
-      withMetadata: 'merged_file_with_metadata.xls',
-      stats: {
-        totalFiles: files.length,
-        totalRows: mergedStandard.length
-      },
-      mergeMap: newMergeMap
+      mode: "per-day readExcel-equivalent",
+      dates: results.map((r) => r.date).sort(),
+      results,
     })
-  } catch (error) {
-    console.error('Merge error:', error)
+  } catch (err) {
+    console.error(err)
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to merge files' },
-      { status: 500 }
-    )
-  }
-}
-
-export async function GET(request: NextRequest) {
-  try {
-    const version = request.nextUrl.searchParams.get('version') as 'standard' | 'withMetadata'
-
-    if (!version || !cachedMergedFiles) {
-      return NextResponse.json({ error: 'No merged file available' }, { status: 400 })
-    }
-
-    const data = cachedMergedFiles[version]
-    const fileName = version === 'standard' ? 'merged_file.xls' : 'merged_file_with_metadata.xls'
-
-    // Create workbook
-    const workbook = XLSX.utils.book_new()
-    const sheet = XLSX.utils.aoa_to_sheet(data)
-    XLSX.utils.book_append_sheet(workbook, sheet, 'Sheet1')
-
-    // Write to buffer
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xls' })
-
-    // Return as file download
-    return new NextResponse(buffer, {
-      headers: {
-        'Content-Type': 'application/vnd.ms-excel',
-        'Content-Disposition': `attachment; filename="${fileName}"`
-      }
-    })
-  } catch (error) {
-    console.error('Download error:', error)
-    return NextResponse.json(
-      { error: 'Failed to download file' },
+      { error: err instanceof Error ? err.message : "Failed to merge files" },
       { status: 500 }
     )
   }
