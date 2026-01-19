@@ -2,7 +2,7 @@
 
 import React from "react"
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Upload, FileSpreadsheet, X, Check, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,14 +13,78 @@ import { parseExcelFile } from '@/lib/diff-analysis'
 
 interface FileUploadProps {
   onFilesUploaded: (originalFiles: UploadedFile[], mergedFile: UploadedFile) => void
+  autoLoadDefault?: boolean
 }
 
-export function FileUpload({ onFilesUploaded }: FileUploadProps) {
+export function FileUpload({ onFilesUploaded, autoLoadDefault }: FileUploadProps) {
   const [originalFiles, setOriginalFiles] = useState<UploadedFile[]>([])
   const [mergedFile, setMergedFile] = useState<UploadedFile | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState<'original' | 'merged' | null>(null)
+
+  // Default file paths
+  const defaultOriginalFiles = [
+    "C:\\Users\\austi\\Documents\\sideProjects\\Alexa-D\\dashboard\\Merge Queue-20260119T064901Z-1-001\\Merge Queue\\2022.07.07.ff.ald.xE.xls",
+    "C:\\Users\\austi\\Documents\\sideProjects\\Alexa-D\\dashboard\\Merge Queue-20260119T064901Z-1-001\\Merge Queue\\2022.07.07.ff.mad.xE.xls"
+  ]
+  const defaultMergedFile = "C:\\Users\\austi\\Documents\\sideProjects\\Alexa-D\\dashboard\\Merged Files-20260119T064749Z-1-001\\Merged Files\\2022.07.07.ff.aldmerge.x.xls"
+
+  // Load files from file system via API
+  const loadFileFromPath = useCallback(async (filePath: string): Promise<UploadedFile | null> => {
+    try {
+      const response = await fetch('/api/load-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath })
+      })
+      if (!response.ok) throw new Error('Failed to load file')
+      const data = await response.json()
+      return data
+    } catch (err) {
+      console.error(`Failed to load file from ${filePath}:`, err)
+      return null
+    }
+  }, [])
+
+  const loadDefaultFiles = useCallback(async () => {
+    setIsProcessing(true)
+    setError(null)
+    
+    try {
+      // Load original files
+      const loaded = await Promise.all(
+        defaultOriginalFiles.map(path => loadFileFromPath(path))
+      )
+      const validOriginalFiles = loaded.filter(f => f !== null) as UploadedFile[]
+      
+      if (validOriginalFiles.length === 0) {
+        setError('Failed to load default original files')
+        return
+      }
+      
+      // Load merged file
+      const merged = await loadFileFromPath(defaultMergedFile)
+      if (!merged) {
+        setError('Failed to load default merged file')
+        return
+      }
+      
+      setOriginalFiles(validOriginalFiles)
+      setMergedFile(merged)
+    } catch (err) {
+      setError('Failed to load default files. Make sure the API endpoint is available.')
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [loadFileFromPath])
+
+  // Auto-load on mount if specified
+  useEffect(() => {
+    if (autoLoadDefault && originalFiles.length === 0 && !mergedFile) {
+      loadDefaultFiles()
+    }
+  }, [autoLoadDefault, originalFiles.length, mergedFile, loadDefaultFiles])
 
   const handleOriginalFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -106,6 +170,15 @@ export function FileUpload({ onFilesUploaded }: FileUploadProps) {
         <p className="text-muted-foreground">
           Upload the original Excel files and the merged output file to see what changes were made during the merge process.
         </p>
+        <Button 
+          variant="outline" 
+          size="sm" 
+          onClick={loadDefaultFiles}
+          disabled={isProcessing}
+          className="mt-3"
+        >
+          Load Default Files
+        </Button>
       </div>
 
       {error && (

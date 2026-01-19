@@ -67,6 +67,10 @@ function formatTimestamp(value: unknown): string {
  * Normalize timestamp for comparison (handle minor formatting differences)
  */
 function normalizeTimestamp(ts: string): string {
+  // Guard against non-string values
+  if (!ts || typeof ts !== 'string') {
+    return ''
+  }
   // Remove extra spaces, standardize format
   return ts.trim().replace(/\s+/g, ' ')
 }
@@ -99,6 +103,11 @@ function createRowKey(subject: string, behavior: string, blockRelativeIndex?: nu
  * Parse timestamp string into a Date object for time calculations
  */
 function parseTimestamp(ts: string): Date {
+  // Guard against non-string values
+  if (!ts || typeof ts !== 'string') {
+    return new Date(0)
+  }
+  
   // Expected format: "MM/DD/YYYY HH:MM:SS"
   const parts = ts.split(' ')
   if (parts.length !== 2) return new Date(0)
@@ -133,14 +142,10 @@ function normalizeSubject(subject: string): string {
 }
 
 /**
- * Break rows into blocks by subject and time proximity (sequential runs only)
+ * Break rows into blocks by subject only (consecutive same subject = same block)
  * 
- * A new block starts if either:
- * - subject differs from previous row, OR
- * - time since previous row exceeds threshold
- * 
- * This creates "streaks" or "runs" that never re-enter earlier blocks,
- * even if subject matches non-adjacent rows.
+ * A new block starts if subject differs from previous row.
+ * Time is ignored - only subject changes trigger new blocks.
  */
 export function createBlocksFromRows(
   rows: Array<{ subject: string; timestamp: string; behavior: string; rowIndex: number }>,
@@ -161,6 +166,7 @@ export function createBlocksFromRows(
 
   const blocks = []
   let blockIndex = 0
+  let currentSubject = normalizeSubject(rows[0].subject)
 
   let currentBlock = {
     id: `${fileName}_block_${blockIndex}`,
@@ -173,21 +179,16 @@ export function createBlocksFromRows(
   }
 
   for (let i = 1; i < rows.length; i++) {
-    const prevRow = rows[i - 1]
     const row = rows[i]
+    const rowSubject = normalizeSubject(row.subject)
 
-    const sameSubject =
-      normalizeSubject(row.subject) === normalizeSubject(prevRow.subject)
-    const withinTime =
-      minutesBetween(prevRow.timestamp, row.timestamp) <= timeThresholdMinutes
-
-    if (sameSubject && withinTime) {
-      // Continue current block
+    if (rowSubject === currentSubject) {
+      // Continue current block - same subject
       currentBlock.rows.push(row)
       currentBlock.endTimestamp = row.timestamp
     } else {
-      // Save current block and start new one
-      const blockLabel = `${normalizeSubject(currentBlock.subject).substring(0, 15)}_${blockIndex}`
+      // Subject changed - save current block and start new one
+      const blockLabel = `${currentSubject.substring(0, 3)}_${blockIndex}`
       blocks.push({
         id: currentBlock.id,
         label: blockLabel,
@@ -200,6 +201,7 @@ export function createBlocksFromRows(
       })
 
       blockIndex++
+      currentSubject = rowSubject
       currentBlock = {
         id: `${fileName}_block_${blockIndex}`,
         subject: row.subject,
@@ -213,7 +215,7 @@ export function createBlocksFromRows(
   }
 
   // Push final block
-  const blockLabel = `${normalizeSubject(currentBlock.subject).substring(0, 15)}_${blockIndex}`
+  const blockLabel = `${currentSubject.substring(0, 3)}_${blockIndex}`
   blocks.push({
     id: currentBlock.id,
     label: blockLabel,
@@ -895,76 +897,99 @@ export function groupRowsByStatus(rows: RowDiffRecord[]): {
 /**
  * Generate merged file visualization showing which blocks came from which original files
  * Returns blocks in the order they appear in the merged file
+ * 
+ * Key: groups by (sourceFileIndex, originalBlockLabel, consecutive merged rows)
+ * Stores exact originalRowIndices instead of a range
  */
 export interface MergedFileBlock {
   sourceFileIndex: number
   sourceFileName: string
   mergedStartRow: number
   mergedEndRow: number
-  originalStartRow: number
-  originalEndRow: number
   count: number
   hasTimestampMods: boolean
+  originalBlockLabel: string | null
+  originalRowIndices: number[]  // exact rows included, in order
 }
 
-export function generateMergedFileBlocks(analysis: DiffAnalysis): MergedFileBlock[] {
-  // Get all kept rows with their merged row index
-  const keptRowsWithMergedIndex: {
-    sourceFileIndex: number
-    sourceFileName: string
-    mergedRowIndex: number
-    originalRowIndex: number
-    timestampModified: boolean
-  }[] = []
+export function generateMergedFileBlocks(analysis: DiffAnalysis, mergedFileRows?: any[], rowToBlockMapping?: Map<string, string>): MergedFileBlock[] {
+  // Reconstruct merged file from kept rows in original files
+  // Collect all kept rows from all original files
+  const keptRows: RowDiffRecord[] = []
   
   analysis.originalFiles.forEach(file => {
     file.rows.forEach(row => {
       if (row.status === 'kept' && row.mergedRowIndex !== undefined) {
-        keptRowsWithMergedIndex.push({
-          sourceFileIndex: row.sourceFileIndex,
-          sourceFileName: row.sourceFileName,
-          mergedRowIndex: row.mergedRowIndex,
-          originalRowIndex: row.originalRowIndex,
-          timestampModified: row.timestampModified
-        })
+        keptRows.push(row)
       }
     })
   })
   
-  // Sort by merged row index
-  keptRowsWithMergedIndex.sort((a, b) => a.mergedRowIndex - b.mergedRowIndex)
+  // Sort by merged row index (order in merged file)
+  keptRows.sort((a, b) => a.mergedRowIndex! - b.mergedRowIndex!)
   
-  if (keptRowsWithMergedIndex.length === 0) return []
+  console.log('generateMergedFileBlocks: Reconstructed merged file with', keptRows.length, 'kept rows')
   
-  // Group consecutive rows from the same file
+  if (keptRows.length === 0) return []
+  
+  // Group by subject - consecutive rows with same subject stay in same block
   const blocks: MergedFileBlock[] = []
+  let blockIdx = 0
   let currentBlock: MergedFileBlock | null = null
+  let currentSubject: string | null = null
   
-  keptRowsWithMergedIndex.forEach(row => {
-    if (!currentBlock ||
-        currentBlock.sourceFileIndex !== row.sourceFileIndex ||
-        row.mergedRowIndex !== currentBlock.mergedEndRow + 1) {
+  keptRows.forEach((row, rowIdx) => {
+    const subjectChanged = currentSubject !== null && row.subject !== currentSubject
+    
+    if (subjectChanged) {
+      console.log(`Row ${rowIdx}: Subject changed from "${currentSubject}" to "${row.subject}" (${row.originalTimestamp}) (from ${row.sourceFileName})`)
+      // Subject changed, save current block and start new one
+      if (currentBlock) {
+        console.log(`  Closing block ${blockIdx}: ${currentBlock.originalBlockLabel} with ${currentBlock.count} rows`)
+        blocks.push(currentBlock)
+        blockIdx++
+      }
+      currentBlock = null
+      currentSubject = null
+    }
+    
+    if (currentBlock === null) {
       // Start new block
-      if (currentBlock) blocks.push(currentBlock)
+      const subjectPrefix = row.subject.substring(0, 3).toUpperCase()
+      const blockLabel = `${subjectPrefix}_${blockIdx}`
+      
+      console.log(`Row ${rowIdx}: Creating block ${blockIdx}: "${blockLabel}" (subject: "${row.subject}", time: ${row.originalTimestamp} from ${row.sourceFileName})`)
+      
       currentBlock = {
         sourceFileIndex: row.sourceFileIndex,
         sourceFileName: row.sourceFileName,
-        mergedStartRow: row.mergedRowIndex,
-        mergedEndRow: row.mergedRowIndex,
-        originalStartRow: row.originalRowIndex,
-        originalEndRow: row.originalRowIndex,
+        mergedStartRow: row.mergedRowIndex!,
+        mergedEndRow: row.mergedRowIndex!,
+        originalBlockLabel: blockLabel,
+        originalRowIndices: [row.originalRowIndex],
         count: 1,
         hasTimestampMods: row.timestampModified
       }
+      currentSubject = row.subject
     } else {
       // Extend current block
-      currentBlock.mergedEndRow = row.mergedRowIndex
-      currentBlock.originalEndRow = row.originalRowIndex
+      console.log(`Row ${rowIdx}: Extending block ${blockIdx}: "${currentBlock.originalBlockLabel}" (subject: "${row.subject}", time: ${row.originalTimestamp} from ${row.sourceFileName})`)
+      currentBlock.mergedEndRow = row.mergedRowIndex!
+      currentBlock.originalRowIndices.push(row.originalRowIndex)
       currentBlock.count++
       if (row.timestampModified) currentBlock.hasTimestampMods = true
     }
   })
   
-  if (currentBlock) blocks.push(currentBlock)
+  if (currentBlock !== null) {
+    console.log(`Final block ${blockIdx}: ${(currentBlock as MergedFileBlock).originalBlockLabel} with ${(currentBlock as MergedFileBlock).count} rows`)
+    blocks.push(currentBlock)
+  }
+  
+  console.log('generateMergedFileBlocks: Created', blocks.length, 'blocks')
+  blocks.forEach((block, idx) => {
+    console.log(`  Block ${idx}: ${block.originalBlockLabel} - rows ${block.mergedStartRow}-${block.mergedEndRow} (${block.count} rows)`)
+  })
+  
   return blocks
 }

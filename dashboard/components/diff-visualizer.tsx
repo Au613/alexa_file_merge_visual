@@ -157,7 +157,7 @@ export function DiffVisualizer({ onBack }: DiffVisualizerProps) {
 
 // Summary View
 function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onReverseMerge: (idx: number) => void }) {
-  const { rowToBlockMapping, originalFiles } = useDiff()
+  const { rowToBlockMapping, originalFiles, mergedFile } = useDiff()
   
   return (
     <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
@@ -340,13 +340,18 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
                 
                 const color = FILE_COLORS[fileIdx % FILE_COLORS.length]
                 const blocks = Array.from(fileRowBlocks.entries()).sort((a, b) => {
-                  const aMin = Math.min(...a[1].rowIndices)
-                  const bMin = Math.min(...b[1].rowIndices)
-                  return aMin - bMin
+                  // Sort by start time instead of row index
+                  const aTime = a[1].rows.length > 0 ? new Date(a[1].rows[0].originalTimestamp).getTime() : Infinity
+                  const bTime = b[1].rows.length > 0 ? new Date(b[1].rows[0].originalTimestamp).getTime() : Infinity
+                  return aTime - bTime
                 })
                 
                 // Helper function to extract time portion from timestamp
                 const extractTime = (timestamp: string) => {
+                  // Guard against non-string values
+                  if (!timestamp || typeof timestamp !== 'string') {
+                    return '-'
+                  }
                   // Assumes format like "MM/DD/YYYY HH:MM:SS"
                   const parts = timestamp.split(' ')
                   return parts.length > 1 ? parts[1] : timestamp
@@ -366,13 +371,18 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
                         const startTime = blockData.rows.length > 0 ? extractTime(blockData.rows[0].originalTimestamp) : '-'
                         const endTime = blockData.rows.length > 0 ? extractTime(blockData.rows[blockData.rows.length - 1].originalTimestamp) : '-'
                         
+                        // Create label: first 3 letters of subject + _n
+                        const subject = blockData.rows.length > 0 ? blockData.rows[0].subject : 'UNK'
+                        const subjectPrefix = subject.substring(0, 3).toUpperCase()
+                        const customLabel = `${subjectPrefix}_${blockIdx}`
+                        
                         return (
                           <div key={blockLabel} className="flex items-center gap-2 text-xs">
                             <div 
                               className="px-2 py-1 rounded font-mono text-white text-[11px] font-bold"
                               style={{ backgroundColor: blockColor.hex }}
                             >
-                              {blockLabel}
+                              {customLabel}
                             </div>
                             <span className="text-muted-foreground">
                               {blockData.count} rows (rows {Math.min(...blockData.rowIndices)}-{Math.max(...blockData.rowIndices)})
@@ -393,7 +403,7 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
             <div className="space-y-3">
               <div className="text-xs font-medium text-muted-foreground mb-2">Merged File</div>
               {(() => {
-                const blocks = generateMergedFileBlocks(analysis)
+                const blocks = generateMergedFileBlocks(analysis, mergedFile?.rows as any, rowToBlockMapping)
                 const blockColorMap = new Map<string, { hex: string; name: string }>()
                 
                 // Build block color map
@@ -408,6 +418,10 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
                 
                 // Helper function to extract time from timestamp
                 const extractTime = (timestamp: string) => {
+                  // Guard against non-string values
+                  if (!timestamp || typeof timestamp !== 'string') {
+                    return '-'
+                  }
                   const parts = timestamp.split(' ')
                   return parts.length > 1 ? parts[1] : timestamp
                 }
@@ -416,14 +430,17 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
                   <div className="space-y-3">
                     {blocks.map((block, idx) => {
                       const sourceFile = analysis.originalFiles[block.sourceFileIndex]
-                      const blockRows = sourceFile?.rows.filter(r => 
-                        r.originalRowIndex >= block.originalStartRow && 
-                        r.originalRowIndex <= block.originalEndRow
-                      ) || []
-                      const blockLabel = blockRows.length > 0 ? 
-                        (rowToBlockMapping.get(`${block.sourceFileIndex}:${blockRows[0].originalRowIndex}`) || '-') : '-'
-                      const blockColor = blockLabel !== '-' ? blockColorMap.get(blockLabel) : null
                       const sourceFileColor = FILE_COLORS[block.sourceFileIndex % FILE_COLORS.length]
+                      
+                      // Use exact row indices instead of range filtering
+                      const indexSet = new Set(block.originalRowIndices)
+                      const blockRows = sourceFile?.rows.filter(r => indexSet.has(r.originalRowIndex)) ?? []
+                      
+                      // Create label: first 3 letters of subject + _n
+                      const subject = blockRows.length > 0 ? blockRows[0].subject : 'UNK'
+                      const subjectPrefix = subject.substring(0, 3).toUpperCase()
+                      const customLabel = `${subjectPrefix}_${idx}`
+                      const mergedBlockColor = blockColorMap.get(block.originalBlockLabel || '')
                       
                       const startTime = blockRows.length > 0 ? extractTime(blockRows[0].originalTimestamp) : '-'
                       const endTime = blockRows.length > 0 ? extractTime(blockRows[blockRows.length - 1].originalTimestamp) : '-'
@@ -443,15 +460,15 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
                           </div>
                           
                           <div className="flex items-center gap-2 flex-wrap gap-y-1">
-                            {blockColor ? (
+                            {mergedBlockColor ? (
                               <div 
                                 className="px-2 py-0.5 rounded text-white text-[10px] font-bold"
-                                style={{ backgroundColor: blockColor.hex }}
+                                style={{ backgroundColor: mergedBlockColor.hex }}
                               >
-                                {blockLabel}
+                                {customLabel}
                               </div>
                             ) : (
-                              <span className="text-[10px] text-muted-foreground">{blockLabel}</span>
+                              <span className="text-[10px] text-muted-foreground">{customLabel}</span>
                             )}
                             
                             <span className="text-[10px] text-muted-foreground">
@@ -486,8 +503,8 @@ function SummaryView({ analysis, onReverseMerge }: { analysis: DiffAnalysis; onR
 
 // Merged File Visualization Component
 function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
-  const blocks = generateMergedFileBlocks(analysis)
-  const { rowToBlockMapping } = useDiff()
+  const { rowToBlockMapping, mergedFile } = useDiff()
+  const blocks = generateMergedFileBlocks(analysis, mergedFile?.rows as any, rowToBlockMapping)
   const totalMergedRows = analysis.mergedFile.totalRows
   
   // Create a map to assign consistent colors to blocks from all files
@@ -514,7 +531,7 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
   console.log('Generated blocks:', blocks.map(b => ({
     file: b.sourceFileIndex + 1,
     mergedRows: `${b.mergedStartRow}-${b.mergedEndRow}`,
-    originalRows: `${b.originalStartRow}-${b.originalEndRow}`,
+    originalRows: b.originalRowIndices.length === 1 ? b.originalRowIndices[0] : `${b.originalRowIndices[0]}-${b.originalRowIndices[b.originalRowIndices.length - 1]}`,
     count: b.count
   })))
   
@@ -542,13 +559,8 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
                   
                   if (block.sourceFileIndex === fileIdx) {
                     // This block belongs to this file - show it colored
-                    // Get the block label for this range
-                    const blockLabel = file.rows.find(r => 
-                      r.originalRowIndex >= block.originalStartRow && 
-                      r.originalRowIndex <= block.originalEndRow
-                    ) && rowToBlockMapping.get(`${file.fileIndex}:${block.originalStartRow}`)
-                    
-                    const blockColor = blockLabel ? blockColorMap.get(blockLabel) : color
+                    const blockLabel = block.originalBlockLabel || 'unknown'
+                    const blockColor = blockColorMap.get(blockLabel)
                     const bgColor = blockColor?.hex || color.hex
                     
                     return (
@@ -560,11 +572,11 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
                           backgroundColor: bgColor,
                           minWidth: blockWidthPercent > 0.5 ? undefined : '2px'
                         }}
-                        title={`File ${fileIdx + 1} (${blockLabel || 'unknown'}): merged rows ${block.mergedStartRow}-${block.mergedEndRow} (${block.count} rows)`}
+                        title={`File ${fileIdx + 1} (${blockLabel}): merged rows ${block.mergedStartRow}-${block.mergedEndRow} (${block.count} rows)`}
                       >
                         {blockWidthPercent > 8 && (
                           <span className="text-[9px] text-white font-bold text-center px-1" style={{ textShadow: '1px 1px 2px rgba(0,0,0,0.5)' }}>
-                            {blockLabel || `${block.count}`}
+                            {blockLabel}
                           </span>
                         )}
                         {blockWidthPercent > 4 && blockWidthPercent <= 8 && (
@@ -649,8 +661,11 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
               {blocks.map((block, idx) => {
                 const color = FILE_COLORS[block.sourceFileIndex % FILE_COLORS.length]
                 const sourceFile = analysis.originalFiles[block.sourceFileIndex]
-                const blockRows = sourceFile?.rows.filter(r => r.originalRowIndex >= block.originalStartRow && r.originalRowIndex <= block.originalEndRow) || []
-                const blockLabel = blockRows.length > 0 && rowToBlockMapping.get(`${block.sourceFileIndex}:${blockRows[0].originalRowIndex}`) || '-'
+                
+                // Use exact row indices instead of range filtering
+                const indexSet = new Set(block.originalRowIndices)
+                const blockRows = sourceFile?.rows.filter(r => indexSet.has(r.originalRowIndex)) ?? []
+                const blockLabel = block.originalBlockLabel || '-'
                 const blockColor = blockLabel !== '-' ? blockColorMap.get(blockLabel) : null
                 const startTimestamp = blockRows.length > 0 ? blockRows[0]?.originalTimestamp : '-'
                 const endTimestamp = blockRows.length > 0 ? blockRows[blockRows.length - 1]?.originalTimestamp : '-'
@@ -684,9 +699,9 @@ function MergedFileVisualization({ analysis }: { analysis: DiffAnalysis }) {
                         : `${block.mergedStartRow}-${block.mergedEndRow}`}
                     </td>
                     <td className="px-3 py-1.5 font-mono text-muted-foreground">
-                      {block.originalStartRow === block.originalEndRow 
-                        ? block.originalStartRow 
-                        : `${block.originalStartRow}-${block.originalEndRow}`}
+                      {block.originalRowIndices.length === 1 
+                        ? block.originalRowIndices[0]
+                        : `${block.originalRowIndices[0]}-${block.originalRowIndices[block.originalRowIndices.length - 1]}`}
                     </td>
                     <td className="px-3 py-1.5">{block.count}</td>
                     <td className="px-3 py-1.5 font-mono text-muted-foreground text-[10px]">
@@ -856,7 +871,7 @@ function TableView({ analysis }: { analysis: DiffAnalysis }) {
             </tr>
           </thead>
           <tbody>
-            {paginatedRows.map((row) => {
+            {paginatedRows.map((row, rowIdx) => {
               const color = FILE_COLORS[row.sourceFileIndex % FILE_COLORS.length]
               const origFile = analysis.originalFiles[row.sourceFileIndex]
               // Calculate merged row number by counting kept rows before this one
@@ -869,7 +884,7 @@ function TableView({ analysis }: { analysis: DiffAnalysis }) {
               
               return (
                 <tr 
-                  key={`${row.sourceFileIndex}-${row.originalRowIndex}`}
+                  key={`page-${currentPage}-row-${startIdx + rowIdx}`}
                   className={cn(
                     "border-b",
                     row.status === 'excluded' && "bg-destructive/5",
