@@ -605,6 +605,51 @@ export default function Home() {
 		}
 	}
 
+	const downloadReconstructedFilesOnly = (date: string) => {
+		try {
+			const result = allResults.find((r) => r.date === date)
+			if (!result) {
+				setError("Result not found for date")
+				return
+			}
+
+			// Reconstruct files from merged + dropped rows
+			const reconstructedFiles = reconstructFilesFromMerged(result.mergedRows, result.droppedRows)
+
+			if (reconstructedFiles.size === 0) {
+				setError("No files to reconstruct")
+				return
+			}
+
+			// Get original filenames to filter valid reconstructed files
+			const originalFileNames = new Set(files.map((f) => f.name))
+
+			// Download each reconstructed file (only those matching original filenames)
+			for (const [fileName, fileData] of reconstructedFiles) {
+				// Only download if the filename matches one of the original uploaded files
+				if (!originalFileNames.has(fileName)) {
+					continue
+				}
+
+				const worksheet = XLSX.utils.aoa_to_sheet(fileData)
+				const workbook = XLSX.utils.book_new()
+				XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1")
+
+				// Create a reconstructed version name
+				const reconstructedName = fileName.replace(/\.xls[x]?$/, "") + "-reconstructed.xls"
+				XLSX.writeFile(workbook, reconstructedName)
+
+				// Small delay between downloads
+				setTimeout(() => {}, 100)
+			}
+
+			setSuccess(true)
+		} catch (err) {
+			console.error("Error during reconstruction download:", err)
+			setError("Failed to download reconstructed files")
+		}
+	}
+
 	const downloadAllFiles = async () => {
 		try {
 			if (allResults.length === 0) {
@@ -1273,16 +1318,26 @@ export default function Home() {
 														</p>
 													</div>
 
-													<Button
-														onClick={() => runReconstructionComparison(result.date)}
-														variant="outline"
-														size="sm"
-														className="shrink-0"
-														disabled={originalFileData.length === 0}
-													>
-														<CheckCircle className="w-4 h-4 mr-2" />
-														Run Comparison
-													</Button>
+													<div className="flex gap-2 shrink-0">
+														<Button
+															onClick={() => runReconstructionComparison(result.date)}
+															variant="outline"
+															size="sm"
+															disabled={originalFileData.length === 0}
+														>
+															<CheckCircle className="w-4 h-4 mr-2" />
+															Run Comparison
+														</Button>
+														<Button
+															onClick={() => downloadReconstructedFilesOnly(result.date)}
+															variant="outline"
+															size="sm"
+															disabled={originalFileData.length === 0}
+														>
+															<Download className="w-4 h-4 mr-2" />
+															Download
+														</Button>
+													</div>
 												</div>
 
 												{/* Results list + tables */}
@@ -1336,7 +1391,7 @@ export default function Home() {
 																			</Badge>
 																		</div>
 
-																		<div className="overflow-x-auto border rounded-lg bg-white">
+																		<div className="overflow-x-auto border rounded-lg">
 																			<table className="w-full text-[10px]">
 																				<thead className="bg-muted border-b">
 																					<tr>
