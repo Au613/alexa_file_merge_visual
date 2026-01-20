@@ -28,6 +28,14 @@ type Row = {
   dateKey: string
 }
 
+type MergedRow = {
+  author: string
+  datetime: string
+  data: string
+  sourceFile: string
+  originalRowNumber: number // 1-based data row index for frontend matching
+}
+
 function excelDateToJSDate(serial: number): Date {
   const utcDays = Math.floor(serial - 25569)
   const utcValue = utcDays * 86400
@@ -329,6 +337,31 @@ function makeOneContinuousFocalFollow(data: any[][]) {
   return data.filter((_, idx) => !removeRowIndexes.includes(idx))
 }
 
+function makeOneContinuousFocalFollow_keepMeta(data: any[][]) {
+  // data row shape: [author, datetime, data, sourceFile, originalRowNumber]
+  const dataCol = 2
+  const F_starts: Array<Record<number, any>> = []
+  const ends: Array<Record<number, any>> = []
+  const losts: Array<Record<number, any>> = []
+
+  data.forEach((row, index) => {
+    if (!row || !row[dataCol] || String(row[dataCol]).trim() === "") return
+    const v = String(row[dataCol])
+    if (v.startsWith("F:")) F_starts.push({ [index]: row })
+    else if (v.toLowerCase().startsWith("end")) ends.push({ [index]: row })
+    else if (v.toLowerCase().startsWith("c lost focal")) losts.push({ [index]: row })
+  })
+
+  const startSplits = splitByKeys(F_starts, losts)
+  const endSplits = splitByKeys(ends, losts)
+
+  const removeStarts = startSplits.map((g) => g.slice(1).map((obj) => Object.keys(obj)[0]))
+  const removeEnds = endSplits.map((g) => g.slice(0, -1).map((obj) => Object.keys(obj)[0]))
+  const removeRowIndexes = [...removeStarts.flat(), ...removeEnds.flat()].map((el) => parseInt(el, 10))
+
+  return data.filter((_, idx) => !removeRowIndexes.includes(idx))
+}
+
 function buildXlsBuffer(data: any[][]): Buffer {
   const workbook = XLSX.utils.book_new()
   const sheet = XLSX.utils.aoa_to_sheet(data)
@@ -398,36 +431,70 @@ export async function POST(req: NextRequest) {
       // NOTE: readExcel uses only the FIRST startPartition for the date
       const datePartitionArray: Partition[] = [allStart[0], ...adjustedFocal]
 
-      // extract partition rows from original sheet (like writeFile_helper)
-      let combinedData: any[][] = []
+      // === Build merged rows WITH provenance (source file + original row #) ===
+      let mergedRows: MergedRow[] = []
+
+      // 1) Partition rows (startPartition + focal partitions)
       for (const p of datePartitionArray) {
         const sheet = sheetByFile.get(p.sourceFile)
         if (!sheet) continue
-        const extracted = sheet.slice(p.startIndex, p.endIndex + 1)
-        combinedData.push(...extracted)
+
+        for (let rowIdx = p.startIndex; rowIdx <= p.endIndex; rowIdx++) {
+          const r = sheet[rowIdx] ?? []
+          const author = String(r?.[0] ?? "")
+          const rawDate = r?.[1]
+          const datetime =
+            typeof rawDate === "number" ? formatIsoDate(excelDateToJSDate(rawDate)) : String(rawDate ?? "")
+          const data = String(r?.[2] ?? "")
+
+          // Sheet row 0 is header, so rowIdx 1..N are actual data rows.
+          // We store originalRowNumber = rowIdx to match frontend's rowIdx loop.
+          mergedRows.push({
+            author,
+            datetime,
+            data,
+            sourceFile: p.sourceFile,
+            originalRowNumber: rowIdx + 1,
+          })
+        }
       }
 
-      // format datetime column like readExcel: [author, formattedDate, data]
-      combinedData = combinedData.map((r) => [r?.[0] ?? "", formatIsoDate(excelDateToJSDate(r?.[1])), r?.[2] ?? ""])
+      // 2) Extra comments (initial/gaps/after) — keep their original index too
+      for (const c of allComments) {
+        mergedRows.push({
+          author: c.author,
+          datetime: c.datetime,
+          data: c.data,
+          sourceFile: c.sourceFile,
+          originalRowNumber: c.index + 1,
+        })
+      }
 
-      // add comments rows
-      const commentsRows = allComments.map((c) => [c.author, c.datetime, c.data])
-      combinedData = [...combinedData, ...commentsRows]
+      // 3) Sort by datetime (same as readExcel)
+      mergedRows.sort((a, b) => new Date(a.datetime).getTime() - new Date(b.datetime).getTime())
 
-      // sort, continuous focal follow, correct mistakes
-      combinedData = sortByDateTimeRows(combinedData)
-      combinedData = makeOneContinuousFocalFollow(combinedData)
+      // 4) makeOneContinuousFocalFollow BUT preserve metadata
+      // Convert to AoA for the existing functions
+      let aoaWithMeta: any[][] = mergedRows.map((r) => [r.author, r.datetime, r.data, r.sourceFile, r.originalRowNumber])
 
-      // build standard + metadata
-      const standardWithHeader = [["Author", "DateTime", "Data"], ...combinedData]
-      const meta = combinedData.map((r) => {
-        // metadata isn't in readExcel output; we keep it optional but aligned
-        return [r[0], r[1], r[2], "(multiple)", "(n/a)"]
-      })
-      const metadataWithHeader = [["Author", "DateTime", "Data", "Source File", "Original Row #"], ...meta]
+      aoaWithMeta = makeOneContinuousFocalFollow_keepMeta(aoaWithMeta)
 
-      const standardBuf = buildXlsBuffer(standardWithHeader)
-      const metaBuf = buildXlsBuffer(metadataWithHeader)
+      // Rebuild objects after transforms
+      mergedRows = aoaWithMeta.map((r) => ({
+        author: String(r?.[0] ?? ""),
+        datetime: String(r?.[1] ?? ""),
+        data: String(r?.[2] ?? ""),
+        sourceFile: String(r?.[3] ?? ""),
+        originalRowNumber: Number(r?.[4] ?? 0),
+      }))
+
+      // 5) Build standard + metadata outputs
+      const standardData: any[][] = mergedRows.map((r) => [r.author, r.datetime, r.data])
+
+      const metadataData: any[][] = mergedRows.map((r) => [r.author, r.datetime, r.data, r.sourceFile, r.originalRowNumber])
+
+      const standardBuf = buildXlsBuffer(standardData)
+      const metaBuf = buildXlsBuffer(metadataData)
 
       results.push({
         date,
@@ -435,7 +502,7 @@ export async function POST(req: NextRequest) {
         standardBase64: standardBuf.toString("base64"),
         withMetadataFileName: `${date}_with_metadata.xls`,
         withMetadataBase64: metaBuf.toString("base64"),
-        stats: { files: items.length, rows: combinedData.length },
+        stats: { files: items.length, rows: mergedRows.length },
       })
     }
 
