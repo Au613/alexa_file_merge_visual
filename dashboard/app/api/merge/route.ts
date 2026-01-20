@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
 import * as XLSX from "xlsx"
+import {
+  checkConsecutiveNoSecondTimestamps,
+  checkPointSampleIntervals,
+  checkFandENDLineBalance,
+} from "@/lib/validators"
 
 type Partition = {
   startIndex: number
@@ -403,6 +408,12 @@ export async function POST(req: NextRequest) {
       withMetadataFileName: string
       withMetadataBase64: string
       stats: { files: number; rows: number }
+      validations?: Array<{
+        check: string
+        passed: boolean
+        issues: string[]
+        warnings: string[]
+      }>
     }> = []
 
     // 3) For each date, replicate master() -> partitionsToFile() -> writeFile_helper()
@@ -496,6 +507,51 @@ export async function POST(req: NextRequest) {
       const standardBuf = buildXlsBuffer(standardData)
       const metaBuf = buildXlsBuffer(metadataData)
 
+      // Run validation checks
+      const metadataAoA: any[][] = mergedRows.map((r) => [r.author, r.datetime, r.data, r.sourceFile, r.originalRowNumber])
+      
+      const perFileForValidation = items.map((it) => ({
+        fileName: it.file.name,
+        rows: it.sheet,
+      }))
+
+      // Build dropped rows for round-trip integrity check
+      // A row is "dropped" if it's not in the merged output
+      const mergedSet = new Set<string>()
+      for (const row of metadataAoA) {
+        const sourceFile = String(row[3] || "")
+        const originalRowNum = Number(row[4] || 0)
+        // originalRowNumber is 1-based, so subtract 1 to match 0-based row indices
+        mergedSet.add(`${sourceFile}|${originalRowNum - 1}`)
+      }
+
+      const droppedRowsAoA: any[][] = []
+      for (const perFile of perFileForValidation) {
+        for (let rowIdx = 0; rowIdx < perFile.rows.length; rowIdx++) {
+          const key = `${perFile.fileName}|${rowIdx}`
+          if (!mergedSet.has(key)) {
+            const row = perFile.rows[rowIdx]
+            // Build dropped row format: [author, datetime, data, sourceFile, originalRowNumber]
+            const author = String(row?.[0] ?? "")
+            const rawDate = row?.[1]
+            const datetime = typeof rawDate === "number" ? formatIsoDate(excelDateToJSDate(rawDate)) : String(rawDate ?? "")
+            const data = String(row?.[2] ?? "")
+            droppedRowsAoA.push([author, datetime, data, perFile.fileName, rowIdx])
+          }
+        }
+      }
+
+      const beforeValidations = [
+        checkFandENDLineBalance(perFileForValidation),
+      ]
+
+      const afterValidations = [
+        checkConsecutiveNoSecondTimestamps(metadataAoA),
+        checkPointSampleIntervals(metadataAoA),
+      ]
+
+      const allValidations = [...beforeValidations, ...afterValidations]
+
       results.push({
         date,
         standardFileName: `${date}.xls`,
@@ -503,6 +559,7 @@ export async function POST(req: NextRequest) {
         withMetadataFileName: `${date}_with_metadata.xls`,
         withMetadataBase64: metaBuf.toString("base64"),
         stats: { files: items.length, rows: mergedRows.length },
+        validations: allValidations,
       })
     }
 

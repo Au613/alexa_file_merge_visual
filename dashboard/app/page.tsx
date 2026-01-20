@@ -7,6 +7,7 @@ import {Card, CardContent} from "@/components/ui/card"
 import {Badge} from "@/components/ui/badge"
 import {Collapsible, CollapsibleTrigger, CollapsibleContent} from "@/components/ui/collapsible"
 import {cn} from "@/lib/utils"
+import {ValidationPanel} from "@/components/ValidationPanel"
 import * as XLSX from "xlsx"
 
 interface UploadedFile {
@@ -57,6 +58,275 @@ function formatIsoDate(isoDate: string | Date): string {
 	const min = String(date.getUTCMinutes()).padStart(2, "0")
 	const sec = String(date.getUTCSeconds()).padStart(2, "0")
 	return `${mm}/${dd}/${yyyy} ${hh}:${min}:${sec}`
+}
+
+function reconstructFilesFromMerged(mergedRows: any[][], droppedRows: any[][]): Map<string, any[][]> {
+	console.log(`=== RECONSTRUCT START: ${mergedRows.length} merged rows, ${droppedRows.length} dropped rows ===`)
+	
+	// Group by source file and sort by original row number
+	const fileMap = new Map<string, Array<{rowIdx: number; data: any[]}>>()
+	const seenRows = new Set<string>() // Track (sourceFile, originalRowNum) to avoid duplicates
+
+	// Process merged rows first
+	for (const row of mergedRows) {
+		const sourceFile = String(row[3] || "")
+		const originalRowNum = Number(row[4] || 0) // This is 1-based from API
+		const key = `${sourceFile}|${originalRowNum - 1}` // Use 0-based for tracking
+		
+		if (seenRows.has(key)) continue // Skip if already added
+		seenRows.add(key)
+		
+		// Take columns 0-2 (author, datetime, data) + any extra columns beyond the metadata columns (3 and 4)
+		const rowData = row.slice(0, 3).concat(row.slice(5))
+		
+		if (!fileMap.has(sourceFile)) {
+			fileMap.set(sourceFile, [])
+		}
+		
+		fileMap.get(sourceFile)!.push({rowIdx: originalRowNum - 1, data: rowData}) // Store 0-based index
+	}
+
+	console.log(`After merged rows: ${Array.from(fileMap.entries()).map(([name, rows]) => `${name}=${rows.length}`).join(", ")}`)
+	
+	// Skip droppedRows header row if present (check if row[3] is "Source File")
+	const droppedDataRows = droppedRows.length > 0 && String(droppedRows[0]?.[3]) === "Source File"
+		? droppedRows.slice(1)
+		: droppedRows
+
+	// Process dropped rows (skip if already in merged)
+	for (const row of droppedDataRows) {
+		const sourceFile = String(row[3] || "")
+		const originalRowNum = Number(row[4] || 0) // This is 0-based from frontend
+		const key = `${sourceFile}|${originalRowNum}`
+
+		if (seenRows.has(key)) continue // Skip if already added
+		seenRows.add(key)
+
+		// Take columns 0-2 (author, datetime, data) + any extra columns beyond the metadata columns (3 and 4)
+		const rowData = row.slice(0, 3).concat(row.slice(5))
+
+		if (!fileMap.has(sourceFile)) {
+			fileMap.set(sourceFile, [])
+		}
+
+		fileMap.get(sourceFile)!.push({rowIdx: originalRowNum, data: rowData})
+	}
+
+	console.log(`After dropped rows: ${Array.from(fileMap.entries()).map(([name, rows]) => `${name}=${rows.length}`).join(", ")}`)
+
+	// Convert to sorted arrays
+	const reconstructedFiles = new Map<string, any[][]>()
+
+	for (const [fileName, rows] of fileMap) {
+		// Sort by original row number
+		rows.sort((a, b) => a.rowIdx - b.rowIdx)
+
+		// Extract just the data (now in original order)
+		const sortedData = rows.map((r) => r.data)
+		reconstructedFiles.set(fileName, sortedData)
+		
+		console.log(`Reconstructed ${fileName}: ${sortedData.length} rows (sample: ${sortedData.slice(0, 1).map((r) => `[${r.map((v) => JSON.stringify(v)).join(", ")}]`).join(" ")})`)
+	}
+
+	console.log(`=== RECONSTRUCT END: ${reconstructedFiles.size} files ===`)
+
+
+	return reconstructedFiles
+}
+
+function normalizeDateCell(v: any): string {
+	if (v == null || v === "") return ""
+
+	// If original file stores Excel serials (numbers)
+	if (typeof v === "number" && Number.isFinite(v)) {
+		return formatIsoDate(excelDateToJSDate(v))
+	}
+
+	// If already a string, normalize whitespace
+	return String(v).trim()
+}
+
+function normalizeCell(v: any, colIdx: number): any {
+	if (v == null) return "" // undefined/null → ""
+
+	// Column 1 is DateTime in schema [author, datetime, data] - must check before string check!
+	if (colIdx === 1) return normalizeDateCell(v)
+
+	if (typeof v === "string") return v.trim()
+
+	// Keep other values as-is (or convert to string if you prefer)
+	return v
+}
+
+function normalizeRow(row: any[], targetLen: number): any[] {
+	const out = new Array(targetLen).fill("")
+	for (let i = 0; i < targetLen; i++) {
+		out[i] = normalizeCell(row?.[i], i)
+	}
+	return out
+}
+
+function isEffectivelyEmptyRow(row: any[]): boolean {
+	if (!row) return true
+	return row.every((cell) => {
+		if (cell == null) return true
+		if (typeof cell === "string") return cell.trim() === ""
+		return false // numbers/booleans mean it's not empty
+	})
+}
+
+function trimTrailingEmptyRows(rows: any[][]): any[][] {
+	let end = rows.length
+	while (end > 0 && isEffectivelyEmptyRow(rows[end - 1])) end--
+	return rows.slice(0, end)
+}
+
+function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows: any[][]}>, reconstructedFiles: Map<string, any[][]>): {results: Array<{fileName: string; matches: boolean; details: string}>; debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}>} {
+	const results: Array<{fileName: string; matches: boolean; details: string}> = []
+	const debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}> = []
+
+	console.log("\n========== COMPARISON START ==========")
+	console.log(`Original files: ${originalFiles.length}`)
+	console.log(`Reconstructed files: ${reconstructedFiles.size}`)
+
+	for (const original of originalFiles) {
+		const reconstructed = reconstructedFiles.get(original.fileName)
+
+		console.log(`\n--- FILE: ${original.fileName} ---`)
+		console.log(`Original rows (raw): ${original.rows.length}`)
+
+		if (!reconstructed) {
+			console.log(`❌ RECONSTRUCTED FILE NOT FOUND`)
+			results.push({
+				fileName: original.fileName,
+				matches: false,
+				details: "Reconstructed file not found",
+			})
+			continue
+		}
+
+		console.log(`Reconstructed rows (raw): ${reconstructed.length}`)
+
+		// Trim trailing empty rows to account for Excel's range behavior
+		const origTrimmed = trimTrailingEmptyRows(original.rows)
+		const reconTrimmed = trimTrailingEmptyRows(reconstructed)
+
+		const origTrimmedCount = original.rows.length - origTrimmed.length
+		const reconTrimmedCount = reconstructed.length - reconTrimmed.length
+
+		console.log(`After trimming trailing empty rows:`)
+		console.log(`  Original: ${original.rows.length} → ${origTrimmed.length} (removed ${origTrimmedCount} trailing empty rows)`)
+		console.log(`  Reconstructed: ${reconstructed.length} → ${reconTrimmed.length} (removed ${reconTrimmedCount} trailing empty rows)`)
+
+		// Collect last 10 rows for debug display
+		const origLast10Start = Math.max(0, original.rows.length - 10)
+		const lastOriginal10 = original.rows.slice(origLast10Start)
+		
+		const reconLast10Start = Math.max(0, reconstructed.length - 10)
+		const lastReconstructed10 = reconstructed.slice(reconLast10Start)
+
+		// Collect first 10 rows for debug display
+		const firstOriginal10 = original.rows.slice(0, Math.min(10, original.rows.length))
+		const firstReconstructed10 = reconstructed.slice(0, Math.min(10, reconstructed.length))
+
+		debugInfo.push({
+			fileName: original.fileName,
+			firstOriginal10,
+			firstReconstructed10,
+			lastOriginal10,
+			lastReconstructed10,
+			origTrimmedLength: origTrimmed.length,
+			reconTrimmedLength: reconTrimmed.length,
+		})
+
+		console.log(`\n  === LAST 10 ORIGINAL ROWS (before trim) ===`)
+		for (let i = origLast10Start; i < original.rows.length; i++) {
+			console.log(`  [${i}]: ${JSON.stringify(original.rows[i])}`)
+		}
+
+		console.log(`\n  === LAST 10 RECONSTRUCTED ROWS (before trim) ===`)
+		for (let i = reconLast10Start; i < reconstructed.length; i++) {
+			console.log(`  [${i}]: ${JSON.stringify(reconstructed[i])}`)
+		}
+
+		console.log(`\n  === AFTER TRIMMING ===`)
+		console.log(`  Original trimmed length: ${origTrimmed.length}`)
+		console.log(`  Reconstructed trimmed length: ${reconTrimmed.length}`)
+		if (origTrimmed.length > 0) {
+			console.log(`  Last original row:`, JSON.stringify(origTrimmed[origTrimmed.length - 1]))
+		}
+		if (reconTrimmed.length > 0) {
+			console.log(`  Last reconstructed row:`, JSON.stringify(reconTrimmed[reconTrimmed.length - 1]))
+		}
+
+		// Compare row counts after trimming
+		if (origTrimmed.length !== reconTrimmed.length) {
+			console.log(`❌ ROW COUNT MISMATCH: ${origTrimmed.length} vs ${reconTrimmed.length} (difference: ${Math.abs(origTrimmed.length - reconTrimmed.length)} rows)`)
+			results.push({
+				fileName: original.fileName,
+				matches: false,
+				details: `Row count: ${origTrimmed.length} vs ${reconTrimmed.length} (difference: ${Math.abs(origTrimmed.length - reconTrimmed.length)} rows)`,
+			})
+			continue
+		}
+
+		console.log(`✅ Row counts match (${origTrimmed.length} rows)`)
+
+		// Line-by-line comparison with normalization
+		let allMatch = true
+		let mismatchCount = 0
+
+		for (let i = 0; i < origTrimmed.length; i++) {
+			const origRow = origTrimmed[i] ?? []
+			const reconRow = reconTrimmed[i] ?? []
+
+			// Decide a stable width to compare (handles trailing blanks)
+			const width = Math.max(origRow.length, reconRow.length, 3)
+
+			const origNorm = normalizeRow(origRow, width)
+			const reconNorm = normalizeRow(reconRow, width)
+
+			const match = JSON.stringify(origNorm) === JSON.stringify(reconNorm)
+
+			if (!match) {
+				if (mismatchCount < 5) {
+					// Show first 5 mismatches with type info
+					console.log(`❌ Row ${i + 1} MISMATCH:`)
+					console.log(`   Original(raw): ${JSON.stringify(origRow)}`)
+					console.log(`   Recon(raw):    ${JSON.stringify(reconRow)}`)
+					console.log(`   Original(norm): ${JSON.stringify(origNorm)}`)
+					console.log(`   Recon(norm):    ${JSON.stringify(reconNorm)}`)
+					console.log(`   DateTime types:`, {
+						orig: typeof origRow?.[1],
+						recon: typeof reconRow?.[1],
+						origVal: origRow?.[1],
+						reconVal: reconRow?.[1],
+					})
+				}
+				mismatchCount++
+				allMatch = false
+			}
+		}
+
+		if (allMatch) {
+			console.log(`✅ ALL ROWS MATCH (${origTrimmed.length} rows)`)
+			results.push({
+				fileName: original.fileName,
+				matches: true,
+				details: `All ${origTrimmed.length} rows match`,
+			})
+		} else {
+			console.log(`❌ ${mismatchCount} ROWS MISMATCH (out of ${origTrimmed.length})`)
+			results.push({
+				fileName: original.fileName,
+				matches: false,
+				details: `${mismatchCount} rows mismatch`,
+			})
+		}
+	}
+
+	console.log("\n========== COMPARISON END ==========\n")
+	return {results, debugInfo}
 }
 
 function SourceFileVisualizer({blocks, mergedRowCount, mergedRows, selectedSourceFile, onSelectSourceFile}: {blocks: SourceFileBlock[]; mergedRowCount: number; mergedRows: any[][]; selectedSourceFile: string | null; onSelectSourceFile: (sourceFile: string | null) => void}) {
@@ -174,6 +444,12 @@ interface MergeResult {
 	sourceFileBlocks: SourceFileBlock[]
 	droppedRows: any[][]
 	analysis: MergeAnalysis
+	validations?: Array<{
+		check: string
+		passed: boolean
+		issues: string[]
+		warnings: string[]
+	}>
 }
 
 export default function Home() {
@@ -184,6 +460,10 @@ export default function Home() {
 	const [allResults, setAllResults] = useState<MergeResult[]>([])
 	const [isProcessing, setIsProcessing] = useState(false)
 	const [selectedSourceFile, setSelectedSourceFile] = useState<string | null>(null)
+	const [originalFileData, setOriginalFileData] = useState<Array<{fileName: string; rows: any[][]}>>([])
+	const [reconstructionComparison, setReconstructionComparison] = useState<Array<{fileName: string; matches: boolean; details: string}> | null>(null)
+	const [reconstructionDebugInfo, setReconstructionDebugInfo] = useState<Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}> | null>(null)
+	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
 
 	const handleDrop = (e: React.DragEvent) => {
 		e.preventDefault()
@@ -281,6 +561,50 @@ export default function Home() {
 		}
 	}
 
+	const runReconstructionComparison = (date: string) => {
+		try {
+			const result = allResults.find((r) => r.date === date)
+			if (!result) {
+				setError("Result not found for date")
+				return
+			}
+
+			// Reconstruct files from merged + dropped rows
+			const reconstructedFiles = reconstructFilesFromMerged(result.mergedRows, result.droppedRows)
+
+			if (reconstructedFiles.size === 0) {
+				setError("No files to reconstruct")
+				return
+			}
+
+			// Compare reconstructed files with originals
+			const {results: comparisonResults, debugInfo} = compareReconstructedFiles(originalFileData, reconstructedFiles)
+
+			setReconstructionComparison(comparisonResults)
+			setReconstructionDebugInfo(debugInfo)
+
+			const allMatch = comparisonResults.length > 0 && comparisonResults.every((r) => r.matches)
+			if (allMatch) {
+				setSuccess(true)
+				setError(null)
+			} else {
+				const failedFiles = comparisonResults
+					.filter((r) => !r.matches)
+					.map((r) => `${r.fileName}: ${r.details}`)
+					.join("; ")
+				setError(`Reconstruction verification failed: ${failedFiles}`)
+			}
+
+			// Optionally pick the first file for viewing (if you still use the modal)
+			if (debugInfo.length > 0) {
+				setComparisonViewFile(debugInfo[0].fileName)
+			}
+		} catch (err) {
+			console.error(err)
+			setError("Failed to run reconstruction comparison")
+		}
+	}
+
 	const downloadAllFiles = async () => {
 		try {
 			if (allResults.length === 0) {
@@ -343,6 +667,10 @@ export default function Home() {
 				originalData.push({fileName: file.name, rows})
 			}
 
+			// Store original file data for reconstruction comparison
+			setOriginalFileData(originalData)
+			setReconstructionComparison(null)
+
 			// Step 2: Send to merge API (new per-date structure)
 			const formData = new FormData()
 			files.forEach((f) => {
@@ -379,14 +707,15 @@ export default function Home() {
 				const mergedRows = parseExcelFile(Buffer.from(mergedBuffer))
 
 				// Build source map from merged file
+				// Note: originalRowNumber (row[4]) is 1-based from API, so subtract 1 to get 0-based index
 				const sourceMap = new Map<string, Set<number>>()
 
 				for (let i = 0; i < mergedRows.length; i++) {
 					const row = mergedRows[i]
 					if (row.length >= 5) {
 						const sourceFile = String(row[3])
-						const originalRowNum = row[4]
-						const key = `${sourceFile}|${originalRowNum}`
+						const originalRowNum = Number(row[4]) // This is 1-based from API
+						const key = `${sourceFile}|${originalRowNum - 1}` // Convert to 0-based for matching
 						sourceMap.set(key, new Set([i]))
 					}
 				}
@@ -498,6 +827,7 @@ export default function Home() {
 					sourceFileBlocks: blocks,
 					droppedRows,
 					analysis: mergeAnalysis,
+					validations: dateResult.validations || [],
 				})
 			}
 
@@ -634,55 +964,494 @@ export default function Home() {
 							</CollapsibleTrigger>
 							<CollapsibleContent className="mt-2">
 								<Card>
-									<CardContent className="pt-6 space-y-6">
-										{/* Visualization */}
-										{result.sourceFileBlocks.length > 0 && result.mergedRows.length > 0 && (
-											<SourceFileVisualizer
-												blocks={result.sourceFileBlocks}
-												mergedRowCount={result.analysis.totalMergedRows}
-												mergedRows={result.mergedRows}
-												selectedSourceFile={selectedSourceFile}
-												onSelectSourceFile={setSelectedSourceFile}
-											/>
+									<CardContent className="pt-6 space-y-4">
+										{/* Validation Results - Collapsible */}
+										{result.validations && result.validations.length > 0 && (
+											<Collapsible defaultOpen={!result.validations.every((v) => v.passed)}>
+												<CollapsibleTrigger className="w-full">
+													<div className="flex items-center gap-2 p-3 rounded-lg border border-slate-200 cursor-pointer transition-colors">
+														<ChevronDown className="w-4 h-4 transition-transform" />
+														<span className="font-semibold text-sm">Data Quality Checks</span>
+														<Badge variant="secondary" className="ml-auto text-xs">
+															{result.validations.filter((v) => v.passed).length}/{result.validations.length} passed
+														</Badge>
+													</div>
+												</CollapsibleTrigger>
+												<CollapsibleContent className="mt-2 ml-2">
+													<ValidationPanel validations={result.validations} title="Data Quality Checks" defaultOpen={!result.validations.every((v) => v.passed)} />
+												</CollapsibleContent>
+											</Collapsible>
 										)}
 
-										{/* Download Section */}
-										<div className="bg-green-500/5 border border-green-500/20 rounded-lg p-4">
-											<h3 className="font-semibold mb-3">Download Merged Files</h3>
-											<div className="grid grid-cols-2 gap-3 mb-4">
-												<div>
-													<p className="text-xs font-medium mb-2">Standard Version</p>
-													<Button onClick={() => downloadFile(result.date, "standard")} variant="outline" size="sm" className="w-full cursor-grab hover:text-inherit">
-														<Download className="w-4 h-4 mr-2" />
-														Download
-													</Button>
+										{/* Visualization */}
+										{result.sourceFileBlocks.length > 0 && result.mergedRows.length > 0 && (
+											<div className="space-y-2">
+												<div className="p-3 rounded-lg border border-slate-200">
+													<div className="flex items-center gap-2 mb-3">
+														<span className="font-semibold text-sm">Source File Distribution</span>
+														<Badge variant="secondary" className="text-xs">
+															{new Set(result.sourceFileBlocks.map((b) => b.sourceFile)).size} files
+														</Badge>
+													</div>
+													<SourceFileVisualizer
+														blocks={result.sourceFileBlocks}
+														mergedRowCount={result.analysis.totalMergedRows}
+														mergedRows={result.mergedRows}
+														selectedSourceFile={selectedSourceFile}
+														onSelectSourceFile={setSelectedSourceFile}
+													/>
 												</div>
-												<div>
-													<p className="text-xs font-medium mb-2">With Metadata</p>
-													<Button onClick={() => downloadFile(result.date, "withMetadata")} variant="outline" size="sm" className="w-full cursor-grab hover:text-inherit">
-														<Download className="w-4 h-4 mr-2" />
-														Download
-													</Button>
+											</div>
+										)}
+
+										{/* Debug Info - Collapsible */}
+										
+										{reconstructionDebugInfo && reconstructionDebugInfo.length > 0 && (
+											<Collapsible defaultOpen={!reconstructionComparison?.every((r) => r.matches)}>
+												<CollapsibleTrigger className="w-full">
+													<div className="flex items-center gap-2 p-3 rounded-lg border border-slate-200 cursor-pointer transition-colors">
+														<ChevronDown className="w-4 h-4 transition-transform" />
+														<span className="font-semibold text-sm">Reconstruction Debug Info</span>
+														<Badge variant="secondary" className="ml-auto text-xs">
+															{reconstructionDebugInfo.length} files
+														</Badge>
+													</div>
+												</CollapsibleTrigger>
+												<CollapsibleContent className="mt-2 ml-2">
+													<div className="space-y-4">
+														{reconstructionDebugInfo.map((debug) => (
+															<div key={debug.fileName} className=" p-3 rounded-lg border border-slate-200">
+																<p className="font-semibold text-sm mb-3">{debug.fileName}</p>
+																
+																<div className="grid grid-cols-2 gap-4 text-xs mb-3">
+																	<div>
+																		<p className="font-semibold text-gray-700 mb-1">After Trim:</p>
+																		<p className="text-gray-600">Original: <span className="font-mono font-bold">{debug.origTrimmedLength}</span> rows</p>
+																		<p className="text-gray-600">Reconstructed: <span className="font-mono font-bold">{debug.reconTrimmedLength}</span> rows</p>
+																		<p className="text-red-600 font-semibold mt-1">Difference: <span className="font-mono">{Math.abs(debug.origTrimmedLength - debug.reconTrimmedLength)}</span> rows</p>
+																	</div>
+																	<div>
+																		<p className="font-semibold text-gray-700 mb-1">Before Trim:</p>
+																		<p className="text-gray-600">Original: <span className="font-mono font-bold">{debug.lastOriginal10.length}</span> rows</p>
+																		<p className="text-gray-600">Reconstructed: <span className="font-mono font-bold">{debug.lastReconstructed10.length}</span> rows</p>
+																	</div>
+																</div>
+
+																<div className="space-y-3">
+																	<Collapsible>
+																		<CollapsibleTrigger className="w-full">
+																			<div className="flex items-center gap-2 p-2 rounded  border border-slate-200 cursor-pointer ">
+																				<ChevronDown className="w-3 h-3 transition-transform" />
+																				<span className="text-xs font-semibold">Last 10 Original Rows</span>
+																			</div>
+																		</CollapsibleTrigger>
+																		<CollapsibleContent className="mt-2">
+																			<div className=" p-2 rounded border border-slate-200 space-y-1 max-h-48 overflow-y-auto">
+																				{debug.lastOriginal10.map((row, i) => (
+																					<div key={i} className="text-[10px] font-mono text-gray-700 p-1  rounded border-l-2 border-blue-400">
+																						<div className="font-semibold text-gray-900">[Row {debug.lastOriginal10.length - 10 + i}]</div>
+																						<div className="break-words whitespace-pre-wrap">{JSON.stringify(row).substring(0, 300)}</div>
+																					</div>
+																				))}
+																			</div>
+																		</CollapsibleContent>
+																	</Collapsible>
+
+																	<Collapsible>
+																		<CollapsibleTrigger className="w-full">
+																			<div className="flex items-center gap-2 p-2 rounded  border border-slate-200 cursor-pointer ">
+																				<ChevronDown className="w-3 h-3 transition-transform" />
+																				<span className="text-xs font-semibold">Last 10 Reconstructed Rows</span>
+																			</div>
+																		</CollapsibleTrigger>
+																		<CollapsibleContent className="mt-2">
+																			<div className=" p-2 rounded border border-slate-200 space-y-1 max-h-48 overflow-y-auto">
+																				{debug.lastReconstructed10.map((row, i) => (
+																					<div key={i} className="text-[10px] font-mono text-gray-700 p-1  rounded border-l-2 border-green-400">
+																						<div className="font-semibold text-gray-900">[Row {debug.lastReconstructed10.length - 10 + i}]</div>
+																						<div className="break-words whitespace-pre-wrap">{JSON.stringify(row).substring(0, 300)}</div>
+																					</div>
+																				))}
+																			</div>
+																		</CollapsibleContent>
+																	</Collapsible>
+																</div>
+															</div>
+														))}
+													</div>
+												</CollapsibleContent>
+											</Collapsible>
+										)}
+
+										{/* Comparison View Modal */}
+										{comparisonViewFile && reconstructionDebugInfo && (
+											<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+												<Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
+													<div className="flex items-center justify-between p-4 border-b ">
+														<div className="flex items-center gap-3">
+															<h2 className="text-lg font-semibold">Row Comparison</h2>
+															<select
+																value={comparisonViewFile}
+																onChange={(e) => setComparisonViewFile(e.target.value)}
+																className="text-sm border border-slate-300 rounded-md p-1.5 "
+															>
+																{reconstructionDebugInfo.map((debug) => (
+																	<option key={debug.fileName} value={debug.fileName}>
+																		{debug.fileName}
+																	</option>
+																))}
+															</select>
+														</div>
+														<button onClick={() => setComparisonViewFile(null)} className="p-1 hover:bg-slate-200 rounded">
+															<X className="w-5 h-5" />
+														</button>
+													</div>
+													<div className="overflow-y-auto flex-1 p-4">
+														{reconstructionDebugInfo.find((d) => d.fileName === comparisonViewFile) && (() => {
+															const debug = reconstructionDebugInfo.find((d) => d.fileName === comparisonViewFile)!
+															return (
+																<div className="space-y-6">
+																	{/* First 10 Rows */}
+																	<div>
+																		<h3 className="text-sm font-semibold mb-3">First 10 Rows</h3>
+																		<div className="grid grid-cols-2 gap-4">
+																			<div className="border rounded-lg p-3 bg-blue-50">
+																				<h4 className="text-xs font-semibold text-blue-900 mb-2">Original</h4>
+																				<div className="space-y-1 max-h-96 overflow-y-auto">
+																					{debug.firstOriginal10.map((row, i) => (
+																						<div key={i} className="text-[10px] font-mono text-gray-700 p-1 bg-white rounded border border-blue-200">
+																							<div className="font-semibold text-gray-900">[{i}]</div>
+																							<div className="break-words whitespace-pre-wrap">{JSON.stringify(row)}</div>
+																						</div>
+																					))}
+																				</div>
+																			</div>
+																			<div className="border rounded-lg p-3 bg-green-50">
+																				<h4 className="text-xs font-semibold text-green-900 mb-2">Reconstructed</h4>
+																				<div className="space-y-1 max-h-96 overflow-y-auto">
+																					{debug.firstReconstructed10.map((row, i) => (
+																						<div key={i} className="text-[10px] font-mono text-gray-700 p-1 bg-white rounded border border-green-200">
+																							<div className="font-semibold text-gray-900">[{i}]</div>
+																							<div className="break-words whitespace-pre-wrap">{JSON.stringify(row)}</div>
+																						</div>
+																					))}
+																				</div>
+																			</div>
+																		</div>
+																	</div>
+
+																	{/* Last 10 Rows */}
+																	<div>
+																		<h3 className="text-sm font-semibold mb-3">Last 10 Rows (Before Trim)</h3>
+																		<div className="grid grid-cols-2 gap-4">
+																			<div className="border rounded-lg p-3 bg-blue-50">
+																				<h4 className="text-xs font-semibold text-blue-900 mb-2">Original ({debug.lastOriginal10.length} rows)</h4>
+																				<div className="space-y-1 max-h-96 overflow-y-auto">
+																					{debug.lastOriginal10.map((row, i) => (
+																						<div key={i} className="text-[10px] font-mono text-gray-700 p-1 bg-white rounded border border-blue-200">
+																							<div className="font-semibold text-gray-900">[{Math.max(0, debug.lastOriginal10.length - 10) + i}]</div>
+																							<div className="break-words whitespace-pre-wrap">{JSON.stringify(row)}</div>
+																						</div>
+																					))}
+																				</div>
+																			</div>
+																			<div className="border rounded-lg p-3 bg-green-50">
+																				<h4 className="text-xs font-semibold text-green-900 mb-2">Reconstructed ({debug.lastReconstructed10.length} rows)</h4>
+																				<div className="space-y-1 max-h-96 overflow-y-auto">
+																					{debug.lastReconstructed10.map((row, i) => (
+																						<div key={i} className="text-[10px] font-mono text-gray-700 p-1 bg-white rounded border border-green-200">
+																							<div className="font-semibold text-gray-900">[{Math.max(0, debug.lastReconstructed10.length - 10) + i}]</div>
+																							<div className="break-words whitespace-pre-wrap">{JSON.stringify(row)}</div>
+																						</div>
+																					))}
+																				</div>
+																			</div>
+																		</div>
+																	</div>
+
+																	{/* Summary */}
+																	<div className="bg-slate-100 p-3 rounded-lg border">
+																		<h4 className="text-sm font-semibold mb-2">Summary</h4>
+																		<div className="grid grid-cols-2 gap-4 text-sm">
+																			<div>
+																				<p className="text-gray-600">Original (after trim): <span className="font-bold text-gray-900">{debug.origTrimmedLength}</span> rows</p>
+																			</div>
+																			<div>
+																				<p className="text-gray-600">Reconstructed (after trim): <span className="font-bold text-gray-900">{debug.reconTrimmedLength}</span> rows</p>
+																			</div>
+																			<div className="col-span-2">
+																				<p className="text-red-600 font-semibold">Difference: <span className="font-mono">{Math.abs(debug.origTrimmedLength - debug.reconTrimmedLength)}</span> rows</p>
+																			</div>
+																		</div>
+																	</div>
+																</div>
+															)
+														})()}
+													</div>
+												</Card>
+											</div>
+										)}
+
+										{/* Downloads & Verification */}
+										<div className="bg-green-500/5 border border-green-500/20 rounded-lg p-4 space-y-4">
+											<div className="flex items-center justify-between p-3 rounded-lg border border-slate-200">
+												<span className="font-semibold text-sm">Downloads & Verification</span>
+
+												{/* Overall status (green only if EVERYTHING matches) */}
+												{reconstructionComparison && reconstructionComparison.length > 0 && (
+													<Badge
+														variant="secondary"
+														className={cn(
+															"text-xs",
+															reconstructionComparison.every((r) => r.matches) ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800"
+														)}
+													>
+														{reconstructionComparison.every((r) => r.matches) ? "✅ Reconstruction Verified" : "❌ Reconstruction Issues"}
+													</Badge>
+												)}
+											</div>
+
+											{/* Merged Files */}
+											<div>
+												<h4 className="text-sm font-semibold mb-2">Merged Files</h4>
+												<div className="grid grid-cols-2 gap-3">
+													<div>
+														<p className="text-xs font-medium mb-2">Standard Version</p>
+														<Button
+															onClick={() => downloadFile(result.date, "standard")}
+															variant="outline"
+															size="sm"
+															className="w-full cursor-grab hover:text-inherit"
+														>
+															<Download className="w-4 h-4 mr-2" />
+															Download
+														</Button>
+													</div>
+													<div>
+														<p className="text-xs font-medium mb-2">With Metadata</p>
+														<Button
+															onClick={() => downloadFile(result.date, "withMetadata")}
+															variant="outline"
+															size="sm"
+															className="w-full cursor-grab hover:text-inherit"
+														>
+															<Download className="w-4 h-4 mr-2" />
+															Download
+														</Button>
+													</div>
 												</div>
 											</div>
 
+											{/* Excluded Rows */}
 											{result.droppedRows && result.droppedRows.length > 1 && (
-												<>
-													<div className="border-t pt-4 mt-4">
-														<h4 className="text-sm font-semibold mb-2">Excluded Rows</h4>
-														<p className="text-xs text-muted-foreground mb-3">Download the {result.droppedRows.length - 1} rows that were excluded from the merge</p>
-														<Button onClick={() => downloadDroppedRows(result.date)} variant="outline" size="sm" className="w-full cursor-grab hover:text-inherit">
-															<Download className="w-4 h-4 mr-2" />
-															Download Excluded Rows
-														</Button>
-													</div>
-												</>
+												<div className="border-t pt-3">
+													<h4 className="text-sm font-semibold mb-2">
+														Excluded Rows <span className="text-xs text-muted-foreground font-normal">({result.droppedRows.length - 1} rows)</span>
+													</h4>
+													<p className="text-xs text-muted-foreground mb-3">
+														Download the {result.droppedRows.length - 1} rows that were excluded from the merge
+													</p>
+													<Button
+														onClick={() => downloadDroppedRows(result.date)}
+														variant="outline"
+														size="sm"
+														className="w-full cursor-grab hover:text-inherit"
+													>
+														<Download className="w-4 h-4 mr-2" />
+														Download Excluded Rows
+													</Button>
+												</div>
 											)}
+
+											{/* Reconstruction Verification (NO DOWNLOADS) */}
+											<div className="border-t pt-3 space-y-3">
+												<div className="flex items-start justify-between gap-3">
+													<div>
+														<h4 className="text-sm font-semibold">Reconstructed vs Original Verification</h4>
+														<p className="text-xs text-muted-foreground">
+															Runs reconstruction + integrity checks without downloading reconstructed files. Shows first/last 10 rows as tables.
+														</p>
+													</div>
+
+													<Button
+														onClick={() => runReconstructionComparison(result.date)}
+														variant="outline"
+														size="sm"
+														className="shrink-0"
+														disabled={originalFileData.length === 0}
+													>
+														<CheckCircle className="w-4 h-4 mr-2" />
+														Run Comparison
+													</Button>
+												</div>
+
+												{/* Results list + tables */}
+												{reconstructionComparison && reconstructionDebugInfo && reconstructionComparison.length > 0 && (
+													<div className="space-y-3">
+														{reconstructionComparison.map((comp) => {
+															const debug = reconstructionDebugInfo.find((d) => d.fileName === comp.fileName)
+
+															// --- helpers scoped inside JSX ---
+															const buildCompareRows = (origRows: any[][], reconRows: any[][]) => {
+																const maxLen = Math.max(
+																	3,
+																	...origRows.map((r) => (Array.isArray(r) ? r.length : 0)),
+																	...reconRows.map((r) => (Array.isArray(r) ? r.length : 0))
+																)
+																const colHeaders = Array.from({length: maxLen}, (_, i) => `Col ${i + 1}`)
+
+																const rows = Array.from({length: Math.max(origRows.length, reconRows.length)}, (_, idx) => {
+																	const o = origRows[idx] ?? []
+																	const r = reconRows[idx] ?? []
+																	const width = Math.max(maxLen, o.length, r.length, 3)
+
+																	const oNorm = normalizeRow(o, width)
+																	const rNorm = normalizeRow(r, width)
+																	const rowMatches = JSON.stringify(oNorm) === JSON.stringify(rNorm)
+
+																	const oCells = Array.from({length: maxLen}, (_, c) => String(o?.[c] ?? ""))
+																	const rCells = Array.from({length: maxLen}, (_, c) => String(r?.[c] ?? ""))
+
+																	return {idx, rowMatches, oCells, rCells}
+																})
+
+																return {colHeaders, rows}
+															}
+
+															const renderCompareTable = (title: string, origRows: any[][], reconRows: any[][]) => {
+																const {colHeaders, rows} = buildCompareRows(origRows, reconRows)
+
+																return (
+																	<div className="space-y-2">
+																		<div className="flex items-center justify-between">
+																			<p className="text-xs font-semibold text-muted-foreground">{title}</p>
+																			<Badge
+																				variant="secondary"
+																				className={cn(
+																					"text-[10px]",
+																					rows.every((r) => r.rowMatches) ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800"
+																				)}
+																			>
+																				{rows.every((r) => r.rowMatches) ? "All rows match" : "Differences found"}
+																			</Badge>
+																		</div>
+
+																		<div className="overflow-x-auto border rounded-lg bg-white">
+																			<table className="w-full text-[10px]">
+																				<thead className="bg-muted border-b">
+																					<tr>
+																						<th className="px-2 py-2 text-left font-semibold w-10">#</th>
+																						<th className="px-2 py-2 text-left font-semibold w-10">OK</th>
+
+																						{/* Original */}
+																						{colHeaders.map((h) => (
+																							<th key={`o-${h}`} className="px-2 py-2 text-left font-semibold whitespace-nowrap">
+																								O {h}
+																							</th>
+																						))}
+
+																						{/* Reconstructed */}
+																						{colHeaders.map((h) => (
+																							<th key={`r-${h}`} className="px-2 py-2 text-left font-semibold whitespace-nowrap">
+																								R {h}
+																							</th>
+																						))}
+																					</tr>
+																				</thead>
+
+																				<tbody>
+																					{rows.map((row) => (
+																						<tr
+																							key={row.idx}
+																							className={cn(
+																								"border-b",
+																								row.idx % 2 === 0 && "bg-muted/10",
+																								row.rowMatches ? "bg-green-500/5" : "bg-red-500/5"
+																							)}
+																						>
+																							<td className="px-2 py-2 font-mono text-muted-foreground">{row.idx + 1}</td>
+																							<td className="px-2 py-2">{row.rowMatches ? "✅" : "❌"}</td>
+
+																							{row.oCells.map((v, i) => (
+																								<td key={`o-${row.idx}-${i}`} className="px-2 py-2 max-w-[220px] truncate">
+																									{v}
+																								</td>
+																							))}
+
+																							{row.rCells.map((v, i) => (
+																								<td key={`r-${row.idx}-${i}`} className="px-2 py-2 max-w-[220px] truncate">
+																									{v}
+																								</td>
+																							))}
+																						</tr>
+																					))}
+																				</tbody>
+																			</table>
+																		</div>
+																	</div>
+																)
+															}
+
+															return (
+																<Collapsible key={comp.fileName} defaultOpen={!comp.matches}>
+																	<CollapsibleTrigger className="w-full">
+																		<div
+																			className={cn(
+																				"flex items-start gap-2 p-3 rounded border cursor-pointer transition-colors",
+																				comp.matches ? "bg-green-500/10 border-green-500/20" : "bg-red-500/10 border-red-500/20"
+																			)}
+																		>
+																			<div className={cn("w-3 h-3 rounded-full mt-1", comp.matches ? "bg-green-500" : "bg-red-500")} />
+																			<div className="flex-1 min-w-0">
+																				<div className="flex items-center justify-between gap-3">
+																					<p className="font-medium text-xs truncate">{comp.fileName}</p>
+																					<ChevronDown className="w-4 h-4 text-muted-foreground" />
+																				</div>
+																				<p className={cn("text-[11px]", comp.matches ? "text-green-800" : "text-red-800")}>
+																					{comp.details}
+																				</p>
+																			</div>
+																		</div>
+																	</CollapsibleTrigger>
+
+																	<CollapsibleContent className="mt-2 ml-2">
+																		{!debug ? (
+																			<div className="text-xs text-muted-foreground p-2">No preview rows available for this file.</div>
+																		) : (
+																			<div className="space-y-4 p-2">
+																				{/* First 10 */}
+																				{renderCompareTable(
+																					"First 10 rows (Original vs Reconstructed)",
+																					debug.firstOriginal10,
+																					debug.firstReconstructed10
+																				)}
+
+																				{/* Last 10 */}
+																				{renderCompareTable(
+																					"Last 10 rows (Original vs Reconstructed)",
+																					debug.lastOriginal10,
+																					debug.lastReconstructed10
+																				)}
+
+																				{/* Small summary */}
+																				<div className="text-[11px] text-muted-foreground border-t pt-2">
+																					After trim: Original <span className="font-mono font-semibold">{debug.origTrimmedLength}</span> rows •
+																					Reconstructed <span className="font-mono font-semibold">{debug.reconTrimmedLength}</span> rows
+																				</div>
+																			</div>
+																		)}
+																	</CollapsibleContent>
+																</Collapsible>
+															)
+														})}
+													</div>
+												)}
+											</div>
 										</div>
-									</CardContent>
-								</Card>
-							</CollapsibleContent>
-						</Collapsible>
+											</CardContent>
+										</Card>
+									</CollapsibleContent>
+								</Collapsible>
 					))}
 				</div>
 			)}
