@@ -5,7 +5,7 @@ import { Table, BarChart3, FileSpreadsheet, ArrowUpDown, History, EyeOff, Eye, C
 import { cn } from '@/lib/utils'
 import { useData } from '@/lib/data-context'
 import { getRainbowColor, getTimeBlockColor, formatDate, formatTime, RAINBOW_COLORS } from '@/lib/types'
-import type { DataRow, DayMergeLog } from '@/lib/types'
+import type { DataRow } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area'
@@ -23,7 +23,6 @@ export function DataVisualizer({ className }: DataVisualizerProps) {
     selectedDay, 
     mergedData,
     excludedData,
-    dayMergeLog,
     toggleRowExclusion,
     clearExclusions,
     exportLogAsJSON,
@@ -149,11 +148,6 @@ export function DataVisualizer({ className }: DataVisualizerProps) {
               <TabsTrigger value="log" className="text-xs px-3 h-7">
                 <History className="w-3 h-3 mr-1" />
                 Log
-                {dayMergeLog && dayMergeLog.files && (
-                  <Badge variant="secondary" className="ml-1 text-[9px] px-1 h-4">
-                    {dayMergeLog.files.reduce((sum, f) => sum + (f.rows?.length || 0), 0)}
-                  </Badge>
-                )}
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -791,8 +785,29 @@ function SegmentView({ data }: SegmentViewProps) {
 
 // Merge Log View component
 
+interface DayMergeLog {
+  displayDate: string
+  totalKept: number
+  totalExcluded: number
+  totalTimestampModifications: number
+  files: {
+    fileIndex: number
+    fileName: string
+    keptRows: number
+    excludedRows: number
+    timestampModifications: number
+    rows: {
+      action: 'kept' | 'excluded'
+      rowIndex: number
+      timeBlock: string
+      originalTimestamp: string
+      newTimestamp?: string
+    }[]
+  }[]
+}
+
 interface MergeLogViewProps {
-  dayLog: DayMergeLog | null
+  dayLog: any
   onExportJSON: () => void
   onExportCSV: () => void
   onExportExcluded: () => void
@@ -898,7 +913,7 @@ function MergeLogView({ dayLog, onExportJSON, onExportCSV, onExportExcluded, onR
       <ScrollArea className="flex-1 p-4">
         <div className="space-y-4">
           {/* File-by-file log */}
-          {dayLog.files.map((file) => {
+          {dayLog.files.map((file: DayMergeLog['files'][number]) => {
             const ranges = groupRowsIntoRanges(file.rows)
             const isExpanded = expandedFile === file.fileIndex
             
@@ -968,7 +983,7 @@ function MergeLogView({ dayLog, onExportJSON, onExportCSV, onExportExcluded, onR
                         </Badge>
                         
                         {range.hasTimestampMod && (
-                          <Clock className="w-3 h-3 text-amber-600" title="Contains timestamp modifications" />
+                          <Clock className="w-3 h-3 text-amber-600" />
                         )}
                       </div>
                     )

@@ -9,7 +9,6 @@ import type {
   FilterRule, 
   SelectionState,
   DataRow,
-  DayMergeLog,
   ExcludedRowsExport
 } from './types'
 import { 
@@ -40,7 +39,6 @@ interface DataContextType {
   excludedData: DataRow[]
   
   // Merge log
-  dayMergeLog: DayMergeLog | null
   excludedRowsExport: ExcludedRowsExport | null
   
   // Selection state
@@ -94,7 +92,6 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [filterRules, setFilterRules] = useState<FilterRule[]>([])
   const [mergedData, setMergedData] = useState<DataRow[]>([])
   const [filteredData, setFilteredData] = useState<DataRow[]>([])
-  const [dayMergeLog, setDayMergeLog] = useState<DayMergeLog | null>(null)
   const [excludedRowsExport, setExcludedRowsExport] = useState<ExcludedRowsExport | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [selection, setSelection] = useState<SelectionState>({
@@ -407,7 +404,6 @@ export function DataProvider({ children }: { children: ReactNode }) {
       applyFilters,
       clearFilters,
       excludedData,
-      dayMergeLog,
       excludedRowsExport,
       toggleRowExclusion,
       excludeRowRange,
