@@ -1,7 +1,8 @@
 "use client"
 
 import {useState} from "react"
-import {Upload, FileSpreadsheet, X, AlertCircle, CheckCircle, Download, ChevronDown} from "lucide-react"
+import Link from "next/link"
+import {Upload, FileSpreadsheet, X, AlertCircle, CheckCircle, Download, ChevronDown, GitCompare} from "lucide-react"
 import {Button} from "@/components/ui/button"
 import {Card, CardContent} from "@/components/ui/card"
 import {Badge} from "@/components/ui/badge"
@@ -897,11 +898,35 @@ export default function Home() {
 	}
 
 	return (
-		<div className="flex flex-col gap-6 p-6 max-w-5xl mx-auto">
-			<div className="text-center mb-4">
-				<h2 className="text-2xl font-semibold mb-2">Merge & Analysis</h2>
-				<p className="text-muted-foreground">Upload original files, merge them, and analyze which rows were kept vs dropped.</p>
+		<div className="flex flex-col min-h-screen gap-6">
+			{/* Navigation Bar */}
+			<div className="border-b bg-slate-50/50 backdrop-blur-sm sticky top-0 z-50">
+				<div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+					<div>
+						<h1 className="text-xl font-bold">Monkey Data Manager</h1>
+					</div>
+					<div className="flex gap-2">
+						<Button variant="default" asChild>
+							<Link href="/" className="flex items-center gap-2">
+								<FileSpreadsheet className="w-4 h-4" />
+								Merge
+							</Link>
+						</Button>
+						<Button variant="outline" asChild>
+							<Link href="/compare" className="flex items-center gap-2">
+								<GitCompare className="w-4 h-4" />
+								Compare
+							</Link>
+						</Button>
+					</div>
+				</div>
 			</div>
+
+			<div className="flex flex-col gap-6 p-6 max-w-5xl mx-auto w-full">
+				<div className="text-center mb-4">
+					<h2 className="text-2xl font-semibold mb-2">Merge & Analysis</h2>
+					<p className="text-muted-foreground">Upload original files, merge them, and analyze which rows were kept vs dropped.</p>
+				</div>
 
 			{error && (
 				<div className="flex items-center gap-2 p-3 rounded-lg bg-destructive/10 text-destructive border border-destructive/20">
@@ -1623,6 +1648,7 @@ export default function Home() {
 					))}
 				</div>
 			)}
+		</div>
 		</div>
 	)
 }
