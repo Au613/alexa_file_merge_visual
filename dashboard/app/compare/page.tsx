@@ -1,12 +1,12 @@
 "use client"
 
-import { useState, useRef } from "react"
+import {useState, useRef} from "react"
 import Link from "next/link"
-import { Upload, Download, X, AlertCircle, CheckCircle, FileSpreadsheet, GitCompare } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { cn } from "@/lib/utils"
+import {Upload, Download, X, AlertCircle, CheckCircle, FileSpreadsheet, GitCompare} from "lucide-react"
+import {Button} from "@/components/ui/button"
+import {Card, CardContent} from "@/components/ui/card"
+import {Badge} from "@/components/ui/badge"
+import {cn} from "@/lib/utils"
 import * as XLSX from "xlsx"
 
 interface FileData {
@@ -21,8 +21,8 @@ interface RowComparison {
 	tsMs: number
 	oldData: any[]
 	newData: any[]
-	status: 'unchanged' | 'added' | 'deleted' | 'modified'
-	selected: 'old' | 'new'
+	status: "unchanged" | "added" | "deleted" | "modified"
+	selected: "old" | "new"
 }
 
 export default function Compare() {
@@ -35,58 +35,56 @@ export default function Compare() {
 	const [showOnlyDifferences, setShowOnlyDifferences] = useState(false)
 	const oldTableRef = useRef<HTMLDivElement>(null)
 	const newTableRef = useRef<HTMLDivElement>(null)
+	const usingScrollbarRef = useRef(false)
 
 	const parseMDYTime = (ts: string): number => {
 		const s = (ts || "").trim()
 		const parts = s.split(/\s+/)
 		if (parts.length < 2) return Number.POSITIVE_INFINITY
-		
+
 		const [mdy, hms] = parts
 		const mdy_parts = mdy.split("/").map(Number)
 		const hms_parts = hms.split(":").map(Number)
-		
+
 		if (mdy_parts.length < 3 || hms_parts.length < 2) return Number.POSITIVE_INFINITY
-		
+
 		const [mm, dd, yyyy] = mdy_parts
 		const [hh, mi, ss] = [hms_parts[0], hms_parts[1], hms_parts[2] || 0]
-		
-		if (
-			!Number.isFinite(mm) || !Number.isFinite(dd) || !Number.isFinite(yyyy) ||
-			!Number.isFinite(hh) || !Number.isFinite(mi)
-		) return Number.POSITIVE_INFINITY
-		
+
+		if (!Number.isFinite(mm) || !Number.isFinite(dd) || !Number.isFinite(yyyy) || !Number.isFinite(hh) || !Number.isFinite(mi)) return Number.POSITIVE_INFINITY
+
 		return new Date(yyyy, mm - 1, dd, hh, mi, ss).getTime()
 	}
 
 	const parseExcelFile = (buffer: Buffer): any[][] => {
-		const workbook = XLSX.read(buffer, { type: "buffer" })
+		const workbook = XLSX.read(buffer, {type: "buffer"})
 		const sheetName = workbook.SheetNames[0]
 		const worksheet = workbook.Sheets[sheetName]
-		const allRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][]
-		
+		const allRows = XLSX.utils.sheet_to_json(worksheet, {header: 1}) as any[][]
+
 		// Filter out rows that are completely empty
-		const filtered = allRows.filter(row => row.some(cell => cell != null && cell !== ''))
-		console.log('Parsed rows:', filtered.slice(0, 5))
-		console.log('Total rows:', filtered.length)
+		const filtered = allRows.filter((row) => row.some((cell) => cell != null && cell !== ""))
+		console.log("Parsed rows:", filtered.slice(0, 5))
+		console.log("Total rows:", filtered.length)
 		return filtered
 	}
 
-	const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>, type: 'old' | 'new') => {
+	const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>, type: "old" | "new") => {
 		const file = e.target.files?.[0]
 		if (!file) return
 
 		try {
 			const buffer = await file.arrayBuffer()
 			const rows = parseExcelFile(Buffer.from(buffer))
-			
-			if (type === 'old') {
-				setOldFile({ name: file.name, rows })
+
+			if (type === "old") {
+				setOldFile({name: file.name, rows})
 			} else {
-				setNewFile({ name: file.name, rows })
+				setNewFile({name: file.name, rows})
 			}
 			setError(null)
 		} catch (err) {
-			setError(`Failed to parse ${type} file: ${err instanceof Error ? err.message : 'Unknown error'}`)
+			setError(`Failed to parse ${type} file: ${err instanceof Error ? err.message : "Unknown error"}`)
 		}
 	}
 
@@ -98,23 +96,23 @@ export default function Compare() {
 
 		setIsProcessing(true)
 		try {
-			console.log('Old file rows:', oldFile.rows.slice(0, 5))
-			console.log('New file rows:', newFile.rows.slice(0, 5))
-			
-			const oldMap = new Map<string, { idx: number; row: any[] }>()
-			const newMap = new Map<string, { idx: number; row: any[] }>()
+			console.log("Old file rows:", oldFile.rows.slice(0, 5))
+			console.log("New file rows:", newFile.rows.slice(0, 5))
+
+			const oldMap = new Map<string, {idx: number; row: any[]}>()
+			const newMap = new Map<string, {idx: number; row: any[]}>()
 
 			oldFile.rows.forEach((row, idx) => {
 				const timestamp = String(row[1] || "")
 				if (timestamp) {
-					oldMap.set(timestamp, { idx, row })
+					oldMap.set(timestamp, {idx, row})
 				}
 			})
 
 			newFile.rows.forEach((row, idx) => {
 				const timestamp = String(row[1] || "")
 				if (timestamp) {
-					newMap.set(timestamp, { idx, row })
+					newMap.set(timestamp, {idx, row})
 				}
 			})
 
@@ -137,8 +135,8 @@ export default function Compare() {
 						tsMs,
 						oldData: row,
 						newData: [],
-						status: 'deleted',
-						selected: 'old',
+						status: "deleted",
+						selected: "old",
 					})
 				} else {
 					const oldDataStr = JSON.stringify(row)
@@ -153,8 +151,8 @@ export default function Compare() {
 						tsMs,
 						oldData: row,
 						newData: newRow.row,
-						status: isModified ? 'modified' : 'unchanged',
-						selected: isModified ? 'new' : 'old',
+						status: isModified ? "modified" : "unchanged",
+						selected: isModified ? "new" : "old",
 					})
 				}
 			})
@@ -171,8 +169,8 @@ export default function Compare() {
 					tsMs,
 					oldData: [],
 					newData: row,
-					status: 'added',
-					selected: 'new',
+					status: "added",
+					selected: "new",
 				})
 			})
 
@@ -181,7 +179,7 @@ export default function Compare() {
 			setComparisons(comparisonResults)
 			setSuccess(true)
 		} catch (err) {
-			setError(`Comparison failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+			setError(`Comparison failed: ${err instanceof Error ? err.message : "Unknown error"}`)
 		} finally {
 			setIsProcessing(false)
 		}
@@ -192,13 +190,13 @@ export default function Compare() {
 			const resultRows: any[][] = []
 
 			comparisons.forEach((comp) => {
-				if (comp.status === 'deleted' && comp.selected === 'old') {
+				if (comp.status === "deleted" && comp.selected === "old") {
 					resultRows.push(comp.oldData)
-				} else if (comp.status === 'added' && comp.selected === 'new') {
+				} else if (comp.status === "added" && comp.selected === "new") {
 					resultRows.push(comp.newData)
-				} else if (comp.status === 'modified') {
-					resultRows.push(comp.selected === 'old' ? comp.oldData : comp.newData)
-				} else if (comp.status === 'unchanged') {
+				} else if (comp.status === "modified") {
+					resultRows.push(comp.selected === "old" ? comp.oldData : comp.newData)
+				} else if (comp.status === "unchanged") {
 					resultRows.push(comp.oldData)
 				}
 			})
@@ -213,23 +211,30 @@ export default function Compare() {
 	}
 
 	const stats = {
-		added: comparisons.filter((c) => c.status === 'added').length,
-		deleted: comparisons.filter((c) => c.status === 'deleted').length,
-		modified: comparisons.filter((c) => c.status === 'modified').length,
-		unchanged: comparisons.filter((c) => c.status === 'unchanged').length,
+		added: comparisons.filter((c) => c.status === "added").length,
+		deleted: comparisons.filter((c) => c.status === "deleted").length,
+		modified: comparisons.filter((c) => c.status === "modified").length,
+		unchanged: comparisons.filter((c) => c.status === "unchanged").length,
 	}
 
-	const handleSyncScroll = (sourceRef: React.RefObject<HTMLDivElement | null>, targetRef: React.RefObject<HTMLDivElement | null>) => {
-		return () => {
+	const handleTrackpadScroll = (sourceRef: React.RefObject<HTMLDivElement | null>, targetRef: React.RefObject<HTMLDivElement | null>) => {
+		return (e: WheelEvent) => {
+			if (usingScrollbarRef.current) return
 			if (sourceRef.current && targetRef.current) {
 				targetRef.current.scrollTop = sourceRef.current.scrollTop
 			}
 		}
 	}
 
-	const filteredComparisons = showOnlyDifferences 
-		? comparisons.filter(c => c.status !== 'unchanged')
-		: comparisons
+	const handleScrollbarMouseDown = () => {
+		usingScrollbarRef.current = true
+	}
+
+	const handleScrollbarMouseUp = () => {
+		usingScrollbarRef.current = false
+	}
+
+	const filteredComparisons = showOnlyDifferences ? comparisons.filter((c) => c.status !== "unchanged") : comparisons
 
 	return (
 		<div className="flex flex-col min-h-screen gap-6">
@@ -292,13 +297,7 @@ export default function Compare() {
 								<Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
 								<p className="text-sm text-muted-foreground mb-3">Drag and drop or</p>
 								<label>
-									<input
-										type="file"
-										accept=".xls,.xlsx"
-										className="hidden"
-										onChange={(e) => handleFileSelect(e, 'old')}
-										disabled={isProcessing}
-									/>
+									<input type="file" accept=".xls,.xlsx" className="hidden" onChange={(e) => handleFileSelect(e, "old")} disabled={isProcessing} />
 									<Button variant="outline" size="sm" asChild disabled={isProcessing}>
 										<span>Browse</span>
 									</Button>
@@ -321,13 +320,7 @@ export default function Compare() {
 								<Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
 								<p className="text-sm text-muted-foreground mb-3">Drag and drop or</p>
 								<label>
-									<input
-										type="file"
-										accept=".xls,.xlsx"
-										className="hidden"
-										onChange={(e) => handleFileSelect(e, 'new')}
-										disabled={isProcessing}
-									/>
+									<input type="file" accept=".xls,.xlsx" className="hidden" onChange={(e) => handleFileSelect(e, "new")} disabled={isProcessing} />
 									<Button variant="outline" size="sm" asChild disabled={isProcessing}>
 										<span>Browse</span>
 									</Button>
@@ -344,12 +337,7 @@ export default function Compare() {
 				</div>
 
 				{/* Process Button */}
-				<Button
-					onClick={runComparison}
-					disabled={!oldFile || !newFile || isProcessing}
-					size="lg"
-					className="w-full"
-				>
+				<Button onClick={runComparison} disabled={!oldFile || !newFile || isProcessing} size="lg" className="w-full">
 					{isProcessing ? "Processing..." : "Compare Files"}
 				</Button>
 
@@ -385,18 +373,10 @@ export default function Compare() {
 								</Card>
 							</div>
 							<div className="flex gap-2">
-								<Button 
-									variant={showOnlyDifferences ? "default" : "outline"}
-									onClick={() => setShowOnlyDifferences(true)}
-									size="sm"
-								>
+								<Button variant={showOnlyDifferences ? "default" : "outline"} onClick={() => setShowOnlyDifferences(true)} size="sm">
 									Differences Only
 								</Button>
-								<Button 
-									variant={!showOnlyDifferences ? "default" : "outline"}
-									onClick={() => setShowOnlyDifferences(false)}
-									size="sm"
-								>
+								<Button variant={!showOnlyDifferences ? "default" : "outline"} onClick={() => setShowOnlyDifferences(false)} size="sm">
 									All Rows
 								</Button>
 							</div>
@@ -409,11 +389,7 @@ export default function Compare() {
 								<div className="px-4 py-3 border-b-2 sticky top-0 z-40">
 									<h3 className="font-semibold text-sm">Old File: {oldFile?.name}</h3>
 								</div>
-								<div 
-									ref={oldTableRef}
-									onScroll={handleSyncScroll(oldTableRef, newTableRef)}
-									className="overflow-y-auto flex-1"
-								>
+								<div ref={oldTableRef} onWheel={handleTrackpadScroll(oldTableRef, newTableRef) as any} onMouseDown={handleScrollbarMouseDown} onMouseUp={handleScrollbarMouseUp} className="overflow-y-auto flex-1">
 									<table className="w-full text-xs">
 										<thead className="bg-gray-900 text-white border-b sticky top-0 z-50">
 											<tr>
@@ -424,30 +400,25 @@ export default function Compare() {
 											</tr>
 										</thead>
 										<tbody>
-											{filteredComparisons.map((comp, idx) => (
-												comp.oldData.length > 0 && (
-													<tr
-														key={`old-${idx}`}
-														className={cn(
-															"border-b",
-															comp.status === 'deleted' && 'bg-red-100',
-															comp.status === 'modified' && 'bg-yellow-50',
-															comp.status === 'unchanged' && 'bg-blue-50'
-														)}
-													>
-														<td className="px-3 py-2 font-mono text-muted-foreground text-xs font-semibold">{comp.oldRowIdx}</td>
-														<td className="px-3 py-2">
-															{comp.status === 'deleted' && <Badge className="bg-red-600 text-xs">DEL</Badge>}
-															{comp.status === 'modified' && <Badge className="bg-yellow-600 text-black text-xs">MOD</Badge>}
-															{comp.status === 'unchanged' && <Badge variant="secondary" className="text-xs">—</Badge>}
-														</td>
-														<td className="px-3 py-2 font-mono text-muted-foreground text-xs">{comp.timestamp}</td>
-														<td className="px-3 py-2 text-gray-700 text-xs whitespace-pre-wrap break-words">
-															{comp.oldData.join(" | ")}
-														</td>
-													</tr>
-												)
-											))}
+											{filteredComparisons.map(
+												(comp, idx) =>
+													comp.oldData.length > 0 && (
+														<tr key={`old-${idx}`} className={cn("border-b", comp.status === "deleted" && "bg-red-100", comp.status === "modified" && "bg-yellow-50", comp.status === "unchanged" && "bg-blue-50")}>
+															<td className="px-3 py-2 font-mono text-muted-foreground text-xs font-semibold">{comp.oldRowIdx}</td>
+															<td className="px-3 py-2">
+																{comp.status === "deleted" && <Badge className="bg-red-600 text-xs">DEL</Badge>}
+																{comp.status === "modified" && <Badge className="bg-yellow-600 text-black text-xs">MOD</Badge>}
+																{comp.status === "unchanged" && (
+																	<Badge variant="secondary" className="text-xs">
+																		—
+																	</Badge>
+																)}
+															</td>
+															<td className="px-3 py-2 font-mono text-muted-foreground text-xs">{comp.timestamp}</td>
+															<td className="px-3 py-2 text-gray-700 text-xs whitespace-pre-wrap break-words">{comp.oldData.join(" | ")}</td>
+														</tr>
+													),
+											)}
 										</tbody>
 									</table>
 								</div>
@@ -458,11 +429,7 @@ export default function Compare() {
 								<div className="px-4 py-3 border-b sticky top-0 z-40">
 									<h3 className="font-semibold text-sm">New File: {newFile?.name}</h3>
 								</div>
-								<div 
-									ref={newTableRef}
-									onScroll={handleSyncScroll(newTableRef, oldTableRef)}
-									className="overflow-y-auto flex-1"
-								>
+								<div ref={newTableRef} onWheel={handleTrackpadScroll(newTableRef, oldTableRef) as any} onMouseDown={handleScrollbarMouseDown} onMouseUp={handleScrollbarMouseUp} className="overflow-y-auto flex-1">
 									<table className="w-full text-xs">
 										<thead className="bg-gray-900 text-white border-b sticky top-0 z-50">
 											<tr>
@@ -473,37 +440,32 @@ export default function Compare() {
 											</tr>
 										</thead>
 										<tbody>
-											{filteredComparisons.map((comp, idx) => (
-												comp.newData.length > 0 && (
-													<tr
-														key={`new-${idx}`}
-														className={cn(
-															"border-b",
-															comp.status === 'added' && 'bg-green-100',
-															comp.status === 'modified' && 'bg-yellow-50',
-															comp.status === 'unchanged' && 'bg-blue-50'
-														)}
-													>
-														<td className="px-3 py-2 font-mono text-muted-foreground text-xs font-semibold">{comp.newRowIdx}</td>
-														<td className="px-3 py-2">
-															{comp.status === 'added' && <Badge className="bg-green-600 text-xs">ADD</Badge>}
-															{comp.status === 'modified' && <Badge className="bg-yellow-600 text-black text-xs">MOD</Badge>}
-															{comp.status === 'unchanged' && <Badge variant="secondary" className="text-xs">—</Badge>}
-														</td>
-														<td className="px-3 py-2 font-mono text-muted-foreground text-xs">{comp.timestamp}</td>
-														<td className="px-3 py-2 text-gray-700 text-xs whitespace-pre-wrap break-words">
-															{comp.newData.join(" | ")}
-														</td>
-													</tr>
-												)
-											))}
+											{filteredComparisons.map(
+												(comp, idx) =>
+													comp.newData.length > 0 && (
+														<tr key={`new-${idx}`} className={cn("border-b", comp.status === "added" && "bg-green-100", comp.status === "modified" && "bg-yellow-50", comp.status === "unchanged" && "bg-blue-50")}>
+															<td className="px-3 py-2 font-mono text-muted-foreground text-xs font-semibold">{comp.newRowIdx}</td>
+															<td className="px-3 py-2">
+																{comp.status === "added" && <Badge className="bg-green-600 text-xs">ADD</Badge>}
+																{comp.status === "modified" && <Badge className="bg-yellow-600 text-black text-xs">MOD</Badge>}
+																{comp.status === "unchanged" && (
+																	<Badge variant="secondary" className="text-xs">
+																		—
+																	</Badge>
+																)}
+															</td>
+															<td className="px-3 py-2 font-mono text-muted-foreground text-xs">{comp.timestamp}</td>
+															<td className="px-3 py-2 text-gray-700 text-xs whitespace-pre-wrap break-words">{comp.newData.join(" | ")}</td>
+														</tr>
+													),
+											)}
 										</tbody>
 									</table>
 								</div>
 							</div>
 						</div>
-										
-{/* Download Button */}
+
+						{/* Download Button */}
 						<Button onClick={downloadResult} className="w-full" size="lg">
 							<Download className="w-4 h-4 mr-2" />
 							Download Result
