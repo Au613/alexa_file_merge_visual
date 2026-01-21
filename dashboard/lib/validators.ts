@@ -11,6 +11,16 @@ interface ValidationResult {
   passed: boolean
   issues: string[]
   warnings: string[]
+  pointSampleIntervals?: Array<{
+    row1: number
+    row2: number
+    time1: string
+    time2: string
+    data1: string
+    data2: string
+    intervalMin: number
+    status: 'pass' | 'fail'
+  }>
 }
 
 /**
@@ -64,10 +74,20 @@ export function checkConsecutiveNoSecondTimestamps(mergedRows: any[][]): Validat
 export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult {
   const issues: string[] = []
   const warnings: string[] = []
+  const intervalDetails: Array<{
+    row1: number
+    row2: number
+    time1: string
+    time2: string
+    data1: string
+    data2: string
+    intervalMin: number
+    status: 'pass' | 'fail'
+  }> = []
 
   // Collect Y lines grouped by sections separated by "F:" or "end" lines
-  const yLineSections: Array<Array<{ rowIdx: number; data: string; datetime: Date }>> = []
-  let currentSection: Array<{ rowIdx: number; data: string; datetime: Date }> = []
+  const yLineSections: Array<Array<{ rowIdx: number; data: string; datetime: Date; originalTime: string }>> = []
+  let currentSection: Array<{ rowIdx: number; data: string; datetime: Date; originalTime: string }> = []
 
   for (let i = 0; i < mergedRows.length; i++) {
     const row = mergedRows[i]
@@ -82,11 +102,11 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
       }
     }
     // Check if line starts with exactly "Y" (not "Y X" or other combinations)
-    else if (data.startsWith("Y ") || data === "Y") {
+    else if (data.startsWith("Y") || data === "Y") {
       try {
         const dateObj = new Date(datetime)
         if (!isNaN(dateObj.getTime())) {
-          currentSection.push({ rowIdx: i, data, datetime: dateObj })
+          currentSection.push({ rowIdx: i, data, datetime: dateObj, originalTime: datetime })
         }
       } catch {
         // Skip invalid dates
@@ -106,6 +126,18 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
       const currLine = yLines[i]
       const intervalMs = currLine.datetime.getTime() - prevLine.datetime.getTime()
       const intervalMin = intervalMs / 60000
+      const status = intervalMin >= 2 && intervalMin <= 3 ? 'pass' : 'fail'
+
+      intervalDetails.push({
+        row1: prevLine.rowIdx + 1,
+        row2: currLine.rowIdx + 1,
+        time1: prevLine.originalTime,
+        time2: currLine.originalTime,
+        data1: prevLine.data,
+        data2: currLine.data,
+        intervalMin: parseFloat(intervalMin.toFixed(2)),
+        status,
+      })
 
       if (intervalMin < 2) {
         issues.push(
@@ -137,6 +169,7 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
     passed: issues.length === 0,
     issues,
     warnings,
+    pointSampleIntervals: intervalDetails,
   }
 }
 

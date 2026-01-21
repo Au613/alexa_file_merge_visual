@@ -449,6 +449,16 @@ interface MergeResult {
 		passed: boolean
 		issues: string[]
 		warnings: string[]
+		pointSampleIntervals?: Array<{
+			row1: number
+			row2: number
+			time1: string
+			time2: string
+			data1: string
+			data2: string
+			intervalMin: number
+			status: 'pass' | 'fail'
+		}>
 	}>
 }
 
@@ -464,6 +474,7 @@ export default function Home() {
 	const [reconstructionComparison, setReconstructionComparison] = useState<Array<{fileName: string; matches: boolean; details: string}> | null>(null)
 	const [reconstructionDebugInfo, setReconstructionDebugInfo] = useState<Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}> | null>(null)
 	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
+	const [pointSampleFilter, setPointSampleFilter] = useState<'all' | 'passed' | 'failed'>('all')
 
 	const handleDrop = (e: React.DragEvent) => {
 		e.preventDefault()
@@ -1022,8 +1033,110 @@ export default function Home() {
 														</Badge>
 													</div>
 												</CollapsibleTrigger>
-												<CollapsibleContent className="mt-2 ml-2">
+												<CollapsibleContent className="mt-2 ml-2 space-y-4">
 													<ValidationPanel validations={result.validations} title="Data Quality Checks" defaultOpen={!result.validations.every((v) => v.passed)} />
+													
+													{/* Point Sample Intervals Table */}
+													{result.validations.find((v) => v.check === "Point Sample Intervals")?.pointSampleIntervals && (
+														(() => {
+															const pointSampleValidation = result.validations.find((v) => v.check === "Point Sample Intervals")
+															const intervals = pointSampleValidation?.pointSampleIntervals || []
+															const filtered = intervals.filter((interval: any) => {
+																if (pointSampleFilter === 'all') return true
+																if (pointSampleFilter === 'passed') return interval.status === 'pass'
+																if (pointSampleFilter === 'failed') return interval.status === 'fail'
+																return true
+															})
+
+															return (
+																<div className="border rounded-lg p-3">
+																	<div className="flex items-center justify-between mb-3">
+																		<h4 className="font-semibold text-sm">Point Sample Intervals</h4>
+																		<div className="flex gap-2">
+																			<Button
+																				variant={pointSampleFilter === 'all' ? 'default' : 'outline'}
+																				size="sm"
+																				onClick={() => setPointSampleFilter('all')}
+																				className="text-xs h-7"
+																			>
+																				All ({intervals.length})
+																			</Button>
+																			<Button
+																				variant={pointSampleFilter === 'passed' ? 'default' : 'outline'}
+																				size="sm"
+																				onClick={() => setPointSampleFilter('passed')}
+																				className="text-xs h-7 bg-green-600 hover:bg-green-700 text-white"
+																			>
+																				Passed ({intervals.filter((i: any) => i.status === 'pass').length})
+																			</Button>
+																			<Button
+																				variant={pointSampleFilter === 'failed' ? 'default' : 'outline'}
+																				size="sm"
+																				onClick={() => setPointSampleFilter('failed')}
+																				className="text-xs h-7 bg-red-600 hover:bg-red-700 text-white"
+																			>
+																				Failed ({intervals.filter((i: any) => i.status === 'fail').length})
+																			</Button>
+																		</div>
+																	</div>
+
+																	<div className="overflow-x-auto border rounded-lg">
+																		<table className="w-full text-xs">
+																			<thead className="border-b">
+																				<tr>
+																					<th className="px-3 py-2 text-left font-semibold">Row 1</th>
+																					<th className="px-3 py-2 text-left font-semibold">Time 1</th>
+																					<th className="px-3 py-2 text-left font-semibold">Y Data 1</th>
+																					<th className="px-3 py-2 text-left font-semibold">Row 2</th>
+																					<th className="px-3 py-2 text-left font-semibold">Time 2</th>
+																					<th className="px-3 py-2 text-left font-semibold">Y Data 2</th>
+																					<th className="px-3 py-2 text-left font-semibold">Duration (min)</th>
+																					<th className="px-3 py-2 text-left font-semibold">Valid (2-3 min)</th>
+																				</tr>
+																			</thead>
+																			<tbody>
+																				{filtered.map((interval: any, idx: number) => {
+																					const data1 = interval.data1 || String(result.mergedRows[interval.row1 - 1]?.[2] || '')
+																					const data2 = interval.data2 || String(result.mergedRows[interval.row2 - 1]?.[2] || '')
+																					return (
+																					<tr
+																						key={idx}
+																						className={cn(
+																							"border-b hover:bg-slate-100 transition-colors",
+																							idx % 2 === 0 && "bg-white",
+																							interval.status === 'pass' ? 'bg-green-50' : 'bg-red-100'
+																						)}
+																					>
+																						<td className={cn("px-3 py-2 font-mono", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.row1}</td>
+																						<td className={cn("px-3 py-2 truncate", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.time1}</td>
+																						<td className={cn("px-3 py-2 truncate", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-gray-700')}>{data1}</td>
+																						<td className={cn("px-3 py-2 font-mono", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.row2}</td>
+																						<td className={cn("px-3 py-2 truncate", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.time2}</td>
+																						<td className={cn("px-3 py-2 truncate", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-gray-700')}>{data2}</td>
+																						<td className={cn("px-3 py-2 font-mono font-semibold", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.intervalMin}</td>
+																						<td className="px-3 py-2">
+																							{interval.status === 'pass' ? (
+																								<Badge className="bg-green-600 text-white">✓ Pass</Badge>
+																							) : (
+																								<Badge className="bg-red-600 text-white">✗ Fail</Badge>
+																							)}
+																						</td>
+																					</tr>
+																					)
+																				})}
+																			</tbody>
+																		</table>
+																	</div>
+
+																	{filtered.length === 0 && (
+																		<div className="text-center py-4 text-sm text-muted-foreground">
+																			No intervals found for selected filter
+																		</div>
+																	)}
+																</div>
+															)
+														})()
+													)}
 												</CollapsibleContent>
 											</Collapsible>
 										)}
