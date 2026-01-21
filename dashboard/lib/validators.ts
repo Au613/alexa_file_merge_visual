@@ -59,25 +59,34 @@ export function checkConsecutiveNoSecondTimestamps(mergedRows: any[][]): Validat
 /**
  * Check 2: Validate point sample intervals for Y lines only
  * Should be 2.5 min apart on average, with no intervals < 2 min or > 3 min
+ * Resets interval checking when encountering "F:" or "end" lines
  */
 export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult {
   const issues: string[] = []
   const warnings: string[] = []
 
-  // Collect Y lines with their timestamps (lines that start with just "Y")
-  const yLines: Array<{ rowIdx: number; data: string; datetime: Date }> = []
+  // Collect Y lines grouped by sections separated by "F:" or "end" lines
+  const yLineSections: Array<Array<{ rowIdx: number; data: string; datetime: Date }>> = []
+  let currentSection: Array<{ rowIdx: number; data: string; datetime: Date }> = []
 
   for (let i = 0; i < mergedRows.length; i++) {
     const row = mergedRows[i]
     const data = String(row[2] || "")
     const datetime = String(row[1] || "")
 
+    // Check if line is "F:" or "end" - if so, start a new section
+    if (data.startsWith("F:") || data.toLowerCase().startsWith("end")) {
+      if (currentSection.length > 0) {
+        yLineSections.push(currentSection)
+        currentSection = []
+      }
+    }
     // Check if line starts with exactly "Y" (not "Y X" or other combinations)
-    if (data.startsWith("Y ") || data === "Y") {
+    else if (data.startsWith("Y ") || data === "Y") {
       try {
         const dateObj = new Date(datetime)
         if (!isNaN(dateObj.getTime())) {
-          yLines.push({ rowIdx: i, data, datetime: dateObj })
+          currentSection.push({ rowIdx: i, data, datetime: dateObj })
         }
       } catch {
         // Skip invalid dates
@@ -85,34 +94,41 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
     }
   }
 
-  // Check intervals between consecutive Y lines
-  for (let i = 1; i < yLines.length; i++) {
-    const prevLine = yLines[i - 1]
-    const currLine = yLines[i]
-    const intervalMs = currLine.datetime.getTime() - prevLine.datetime.getTime()
-    const intervalMin = intervalMs / 60000
-
-    if (intervalMin < 2) {
-      issues.push(
-        `Rows ${prevLine.rowIdx + 1}-${currLine.rowIdx + 1}: Interval too short (${intervalMin.toFixed(2)} min). Expected 2-3 min.`
-      )
-    } else if (intervalMin > 3) {
-      issues.push(
-        `Rows ${prevLine.rowIdx + 1}-${currLine.rowIdx + 1}: Interval too long (${intervalMin.toFixed(2)} min). Expected 2-3 min.`
-      )
-    }
+  // Don't forget the last section
+  if (currentSection.length > 0) {
+    yLineSections.push(currentSection)
   }
 
-  // Calculate average interval
-  if (yLines.length > 1) {
-    const totalMs = yLines[yLines.length - 1].datetime.getTime() - yLines[0].datetime.getTime()
-    const avgIntervalMin = totalMs / (yLines.length - 1) / 60000
-    
-    if (Math.abs(avgIntervalMin - 2.5) > 0.5) {
-      warnings.push(
-        `Average interval between Y lines is ${avgIntervalMin.toFixed(2)} min (expected ~2.5 min). ` +
-        `Found ${yLines.length} Y lines over ${(totalMs / 60000).toFixed(1)} minutes.`
-      )
+  // Check intervals between consecutive Y lines within each section
+  for (const yLines of yLineSections) {
+    for (let i = 1; i < yLines.length; i++) {
+      const prevLine = yLines[i - 1]
+      const currLine = yLines[i]
+      const intervalMs = currLine.datetime.getTime() - prevLine.datetime.getTime()
+      const intervalMin = intervalMs / 60000
+
+      if (intervalMin < 2) {
+        issues.push(
+          `Rows ${prevLine.rowIdx + 1}-${currLine.rowIdx + 1}: Interval too short (${intervalMin.toFixed(2)} min). Expected 2-3 min.`
+        )
+      } else if (intervalMin > 3) {
+        issues.push(
+          `Rows ${prevLine.rowIdx + 1}-${currLine.rowIdx + 1}: Interval too long (${intervalMin.toFixed(2)} min). Expected 2-3 min.`
+        )
+      }
+    }
+
+    // Calculate average interval for this section
+    if (yLines.length > 1) {
+      const totalMs = yLines[yLines.length - 1].datetime.getTime() - yLines[0].datetime.getTime()
+      const avgIntervalMin = totalMs / (yLines.length - 1) / 60000
+      
+      if (Math.abs(avgIntervalMin - 2.5) > 0.5) {
+        warnings.push(
+          `Average interval between Y lines is ${avgIntervalMin.toFixed(2)} min (expected ~2.5 min). ` +
+          `Found ${yLines.length} Y lines over ${(totalMs / 60000).toFixed(1)} minutes.`
+        )
+      }
     }
   }
 
