@@ -57,27 +57,27 @@ export function checkConsecutiveNoSecondTimestamps(mergedRows: any[][]): Validat
 }
 
 /**
- * Check 2: Validate point sample intervals for X/Y lines
+ * Check 2: Validate point sample intervals for Y lines only
  * Should be 2.5 min apart on average, with no intervals < 2 min or > 3 min
  */
 export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult {
   const issues: string[] = []
   const warnings: string[] = []
 
-  // Collect X and Y lines with their timestamps
-  const xyLines: Array<{ rowIdx: number; data: string; datetime: Date }> = []
+  // Collect Y lines with their timestamps (lines that start with just "Y")
+  const yLines: Array<{ rowIdx: number; data: string; datetime: Date }> = []
 
   for (let i = 0; i < mergedRows.length; i++) {
     const row = mergedRows[i]
     const data = String(row[2] || "")
     const datetime = String(row[1] || "")
 
-    // Check if line starts with X or Y
-    if (data.startsWith("X") || data.startsWith("Y")) {
+    // Check if line starts with exactly "Y" (not "Y X" or other combinations)
+    if (data.startsWith("Y ") || data === "Y") {
       try {
         const dateObj = new Date(datetime)
         if (!isNaN(dateObj.getTime())) {
-          xyLines.push({ rowIdx: i, data, datetime: dateObj })
+          yLines.push({ rowIdx: i, data, datetime: dateObj })
         }
       } catch {
         // Skip invalid dates
@@ -85,10 +85,10 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
     }
   }
 
-  // Check intervals between consecutive X/Y lines
-  for (let i = 1; i < xyLines.length; i++) {
-    const prevLine = xyLines[i - 1]
-    const currLine = xyLines[i]
+  // Check intervals between consecutive Y lines
+  for (let i = 1; i < yLines.length; i++) {
+    const prevLine = yLines[i - 1]
+    const currLine = yLines[i]
     const intervalMs = currLine.datetime.getTime() - prevLine.datetime.getTime()
     const intervalMin = intervalMs / 60000
 
@@ -104,14 +104,14 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
   }
 
   // Calculate average interval
-  if (xyLines.length > 1) {
-    const totalMs = xyLines[xyLines.length - 1].datetime.getTime() - xyLines[0].datetime.getTime()
-    const avgIntervalMin = totalMs / (xyLines.length - 1) / 60000
+  if (yLines.length > 1) {
+    const totalMs = yLines[yLines.length - 1].datetime.getTime() - yLines[0].datetime.getTime()
+    const avgIntervalMin = totalMs / (yLines.length - 1) / 60000
     
     if (Math.abs(avgIntervalMin - 2.5) > 0.5) {
       warnings.push(
-        `Average interval between X/Y lines is ${avgIntervalMin.toFixed(2)} min (expected ~2.5 min). ` +
-        `Found ${xyLines.length} X/Y lines over ${(totalMs / 60000).toFixed(1)} minutes.`
+        `Average interval between Y lines is ${avgIntervalMin.toFixed(2)} min (expected ~2.5 min). ` +
+        `Found ${yLines.length} Y lines over ${(totalMs / 60000).toFixed(1)} minutes.`
       )
     }
   }
