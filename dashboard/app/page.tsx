@@ -183,9 +183,9 @@ function trimTrailingEmptyRows(rows: any[][]): any[][] {
 	return rows.slice(0, end)
 }
 
-function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows: any[][]}>, reconstructedFiles: Map<string, any[][]>): {results: Array<{fileName: string; matches: boolean; details: string}>; debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}>} {
+function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows: any[][]}>, reconstructedFiles: Map<string, any[][]>): {results: Array<{fileName: string; matches: boolean; details: string}>; debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>}>} {
 	const results: Array<{fileName: string; matches: boolean; details: string}> = []
-	const debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}> = []
+	const debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>}> = []
 
 	console.log("\n========== COMPARISON START ==========")
 	console.log(`Original files: ${originalFiles.length}`)
@@ -231,16 +231,6 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 		const firstOriginal10 = original.rows.slice(0, Math.min(10, original.rows.length))
 		const firstReconstructed10 = reconstructed.slice(0, Math.min(10, reconstructed.length))
 
-		debugInfo.push({
-			fileName: original.fileName,
-			firstOriginal10,
-			firstReconstructed10,
-			lastOriginal10,
-			lastReconstructed10,
-			origTrimmedLength: origTrimmed.length,
-			reconTrimmedLength: reconTrimmed.length,
-		})
-
 		console.log(`\n  === LAST 10 ORIGINAL ROWS (before trim) ===`)
 		for (let i = origLast10Start; i < original.rows.length; i++) {
 			console.log(`  [${i}]: ${JSON.stringify(original.rows[i])}`)
@@ -269,6 +259,16 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 				matches: false,
 				details: `Row count: ${origTrimmed.length} vs ${reconTrimmed.length} (difference: ${Math.abs(origTrimmed.length - reconTrimmed.length)} rows)`,
 			})
+			debugInfo.push({
+				fileName: original.fileName,
+				firstOriginal10,
+				firstReconstructed10,
+				lastOriginal10,
+				lastReconstructed10,
+				origTrimmedLength: origTrimmed.length,
+				reconTrimmedLength: reconTrimmed.length,
+				misalignedRows: [],
+			})
 			continue
 		}
 
@@ -277,6 +277,7 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 		// Line-by-line comparison with normalization
 		let allMatch = true
 		let mismatchCount = 0
+		const misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}> = []
 
 		for (let i = 0; i < origTrimmed.length; i++) {
 			const origRow = origTrimmed[i] ?? []
@@ -307,6 +308,7 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 				}
 				mismatchCount++
 				allMatch = false
+				misalignedRows.push({rowIdx: i, original: origRow, reconstructed: reconRow})
 			}
 		}
 
@@ -325,6 +327,17 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 				details: `${mismatchCount} rows mismatch`,
 			})
 		}
+
+		debugInfo.push({
+			fileName: original.fileName,
+			firstOriginal10,
+			firstReconstructed10,
+			lastOriginal10,
+			lastReconstructed10,
+			origTrimmedLength: origTrimmed.length,
+			reconTrimmedLength: reconTrimmed.length,
+			misalignedRows,
+		})
 	}
 
 	console.log("\n========== COMPARISON END ==========\n")
@@ -477,7 +490,7 @@ export default function Home() {
 	const [selectedSourceFile, setSelectedSourceFile] = useState<string | null>(null)
 	const [originalFileData, setOriginalFileData] = useState<Array<{fileName: string; rows: any[][]}>>([])
 	const [reconstructionComparison, setReconstructionComparison] = useState<Array<{fileName: string; matches: boolean; details: string}> | null>(null)
-	const [reconstructionDebugInfo, setReconstructionDebugInfo] = useState<Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}> | null>(null)
+	const [reconstructionDebugInfo, setReconstructionDebugInfo] = useState<Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>}> | null>(null)
 	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
 	const [pointSampleFilter, setPointSampleFilter] = useState<'all' | 'passed' | 'failed'>('all')
 	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
@@ -1335,6 +1348,36 @@ export default function Home() {
 																			</div>
 																		</CollapsibleContent>
 																	</Collapsible>
+
+																	{debug.misalignedRows.length > 0 && (
+																		<Collapsible>
+																			<CollapsibleTrigger className="w-full">
+																				<div className="flex items-center gap-2 p-2 rounded border border-red-300 cursor-pointer bg-red-50">
+																					<ChevronDown className="w-3 h-3 transition-transform" />
+																					<span className="text-xs font-semibold text-red-900">Misaligned Rows ({debug.misalignedRows.length})</span>
+																				</div>
+																			</CollapsibleTrigger>
+																			<CollapsibleContent className="mt-2">
+																				<div className="p-2 rounded border border-red-300 space-y-2 max-h-96 overflow-y-auto bg-red-50">
+																					{debug.misalignedRows.map((mismatch, idx) => (
+																						<div key={idx} className="border border-red-400 rounded p-2 bg-white">
+																							<div className="font-semibold text-xs text-red-900 mb-1">Row {mismatch.rowIdx}</div>
+																							<div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+																								<div>
+																									<div className="text-red-700 font-semibold mb-1">Original:</div>
+																									<div className="text-gray-700 bg-red-50 p-1 rounded">{JSON.stringify(mismatch.original)}</div>
+																								</div>
+																								<div>
+																									<div className="text-blue-700 font-semibold mb-1">Reconstructed:</div>
+																									<div className="text-gray-700 bg-blue-50 p-1 rounded">{JSON.stringify(mismatch.reconstructed)}</div>
+																								</div>
+																							</div>
+																						</div>
+																					))}
+																				</div>
+																			</CollapsibleContent>
+																		</Collapsible>
+																	)}
 																</div>
 															</div>
 														))}
