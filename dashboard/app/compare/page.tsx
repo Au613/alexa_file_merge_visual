@@ -736,19 +736,19 @@ export default function Compare() {
   return (
     <div className="flex flex-col min-h-screen gap-6">
       {/* Navigation Bar */}
-      <div className="border-b bg-slate-50/50 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-full mx-auto px-12 py-4 flex items-center justify-between">
+      <div className="border-b  backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold">Monkey Data Manager</h1>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" asChild>
+            <Button variant="default" asChild>
               <Link href="/" className="flex items-center gap-2">
                 <FileSpreadsheet className="w-4 h-4" />
                 Merge
               </Link>
             </Button>
-            <Button variant="default" asChild>
+            <Button variant="outline" asChild className="hover:opacity-70 hover:text-inherit">
               <Link href="/compare" className="flex items-center gap-2">
                 <GitCompare className="w-4 h-4" />
                 Compare
