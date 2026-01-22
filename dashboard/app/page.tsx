@@ -321,6 +321,7 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 			})
 		} else {
 			console.log(`❌ ${mismatchCount} ROWS MISMATCH (out of ${origTrimmed.length})`)
+			console.log(`🔍 MISALIGNED ROWS DEBUG:`, JSON.stringify(misalignedRows, null, 2))
 			results.push({
 				fileName: original.fileName,
 				matches: false,
@@ -1349,34 +1350,140 @@ export default function Home() {
 																		</CollapsibleContent>
 																	</Collapsible>
 
-																	{debug.misalignedRows.length > 0 && (
-																		<Collapsible>
-																			<CollapsibleTrigger className="w-full">
-																				<div className="flex items-center gap-2 p-2 rounded border border-red-300 cursor-pointer bg-red-50">
-																					<ChevronDown className="w-3 h-3 transition-transform" />
-																					<span className="text-xs font-semibold text-red-900">Misaligned Rows ({debug.misalignedRows.length})</span>
-																				</div>
-																			</CollapsibleTrigger>
-																			<CollapsibleContent className="mt-2">
-																				<div className="p-2 rounded border border-red-300 space-y-2 max-h-96 overflow-y-auto bg-red-50">
-																					{debug.misalignedRows.map((mismatch, idx) => (
-																						<div key={idx} className="border border-red-400 rounded p-2 bg-white">
-																							<div className="font-semibold text-xs text-red-900 mb-1">Row {mismatch.rowIdx}</div>
-																							<div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-																								<div>
-																									<div className="text-red-700 font-semibold mb-1">Original:</div>
-																									<div className="text-gray-700 bg-red-50 p-1 rounded">{JSON.stringify(mismatch.original)}</div>
-																								</div>
-																								<div>
-																									<div className="text-blue-700 font-semibold mb-1">Reconstructed:</div>
-																									<div className="text-gray-700 bg-blue-50 p-1 rounded">{JSON.stringify(mismatch.reconstructed)}</div>
-																								</div>
-																							</div>
-																						</div>
-																					))}
-																				</div>
-																			</CollapsibleContent>
-																		</Collapsible>
+																	{debug.misalignedRows && debug.misalignedRows.length > 0 ? (
+																		<div className="space-y-3">
+																			{(() => {
+																				const commentMisalignments: typeof debug.misalignedRows = []
+																				const realMisalignments: typeof debug.misalignedRows = []
+
+																				debug.misalignedRows.forEach((mismatch) => {
+																					// Check if only difference is 4th column
+																					const origHas4th = mismatch.original.length > 3
+																					const reconHas4th = mismatch.reconstructed.length > 3
+																					
+																					if (origHas4th && !reconHas4th && mismatch.original.length === 4 && mismatch.reconstructed.length === 3) {
+																						// Check if first 3 columns match
+																						const first3Match = mismatch.original.slice(0, 3).every((val, i) => {
+																							const origVal = formatIsoDate(excelDateToJSDate(typeof val === 'number' ? val : parseInt(String(val))))
+																							const reconVal = String(mismatch.reconstructed[i])
+																							return origVal === reconVal || val === mismatch.reconstructed[i]
+																						})
+																						
+																						if (first3Match) {
+																							commentMisalignments.push(mismatch)
+																							return
+																						}
+																					}
+																					
+																					realMisalignments.push(mismatch)
+																				})
+
+																				return (
+																					<>
+																						{commentMisalignments.length > 0 && (
+																							<Collapsible defaultOpen={true}>
+																								<CollapsibleTrigger className="w-full">
+																									<div className="flex items-center gap-2 p-2 rounded border border-yellow-300 cursor-pointer bg-yellow-50">
+																										<ChevronDown className="w-3 h-3 transition-transform" />
+																										<span className="text-xs font-semibold text-yellow-900">⚠️ Column Mismatch - Extra Columns ({commentMisalignments.length})</span>
+																									</div>
+																								</CollapsibleTrigger>
+																								<CollapsibleContent className="mt-2">
+																									<div className="p-2 rounded border border-yellow-300 space-y-2 max-h-96 overflow-y-auto bg-yellow-50">
+																										<div className="text-xs text-yellow-900 mb-2 p-2 rounded bg-yellow-100">
+																											<p className="font-semibold mb-1">ℹ️ These rows match on the first 3 columns but the original has extra comment columns (4th column) that are not in the reconstructed file.</p>
+																										</div>
+																										{commentMisalignments.map((mismatch, idx) => {
+																											const formatDisplayValue = (val: any): any => {
+																												if (typeof val === 'number' && val > 1000 && val < 50000) {
+																													return formatIsoDate(excelDateToJSDate(val))
+																												}
+																												return val
+																											}
+
+																											return (
+																												<div key={idx} className="border border-yellow-400 rounded p-2 bg-white">
+																													<div className="font-semibold text-xs text-yellow-900 mb-2">Row {mismatch.rowIdx}</div>
+																													<div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+																														<div>
+																															<div className="font-semibold text-gray-700 mb-1">Original File:</div>
+																															<div className="text-gray-700 bg-orange-50 p-2 rounded break-all border-l-4 border-orange-400">
+																																[ {mismatch.original.slice(0, 3).map((v, i) => (
+																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(formatDisplayValue(v))}</span>
+																																))}<span className="bg-orange-200 px-1 rounded"> {JSON.stringify(mismatch.original[3])} </span>]
+																															</div>
+																														</div>
+																														<div>
+																															<div className="font-semibold text-gray-700 mb-1">Reconstructed File:</div>
+																															<div className="text-gray-700 bg-blue-50 p-2 rounded break-all border-l-4 border-blue-400">
+																																[ {mismatch.reconstructed.map((v, i) => (
+																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(v)}</span>
+																																))} ]
+																															</div>
+																														</div>
+																													</div>
+																												</div>
+																											)
+																										})}
+																									</div>
+																								</CollapsibleContent>
+																							</Collapsible>
+																						)}
+																						
+																						{realMisalignments.length > 0 && (
+																							<Collapsible defaultOpen={true}>
+																								<CollapsibleTrigger className="w-full">
+																									<div className="flex items-center gap-2 p-2 rounded border border-red-300 cursor-pointer bg-red-50">
+																										<ChevronDown className="w-3 h-3 transition-transform" />
+																										<span className="text-xs font-semibold text-red-900">Actual Data Mismatches ({realMisalignments.length})</span>
+																									</div>
+																								</CollapsibleTrigger>
+																								<CollapsibleContent className="mt-2">
+																									<div className="p-2 rounded border border-red-300 space-y-2 max-h-96 overflow-y-auto bg-red-50">
+																										{realMisalignments.map((mismatch, idx) => {
+																											const formatDisplayValue = (val: any): any => {
+																												if (typeof val === 'number' && val > 1000 && val < 50000) {
+																													return formatIsoDate(excelDateToJSDate(val))
+																												}
+																												return val
+																											}
+
+																											return (
+																												<div key={idx} className="border border-red-400 rounded p-2 bg-white">
+																													<div className="font-semibold text-xs text-red-900 mb-2">Row {mismatch.rowIdx}</div>
+																													<div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+																														<div>
+																															<div className="font-semibold text-gray-700 mb-1">Original File:</div>
+																															<div className="text-gray-700 bg-red-50 p-2 rounded break-all border-l-4 border-red-400">
+																																[ {mismatch.original.map((v, i) => (
+																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(formatDisplayValue(v))}</span>
+																																))} ]
+																															</div>
+																														</div>
+																														<div>
+																															<div className="font-semibold text-gray-700 mb-1">Reconstructed File:</div>
+																															<div className="text-gray-700 bg-blue-50 p-2 rounded break-all border-l-4 border-blue-400">
+																																[ {mismatch.reconstructed.map((v, i) => (
+																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(v)}</span>
+																																))} ]
+																															</div>
+																														</div>
+																													</div>
+																												</div>
+																											)
+																										})}
+																									</div>
+																								</CollapsibleContent>
+																							</Collapsible>
+																						)}
+																					</>
+																				)
+																			})()}
+																		</div>
+																	) : (
+																		<div className="p-2 rounded border border-green-300 bg-green-50 text-xs text-green-900">
+																			✓ No misaligned rows found
+																		</div>
 																	)}
 																</div>
 															</div>
