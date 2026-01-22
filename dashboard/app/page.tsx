@@ -190,9 +190,24 @@ function trimTrailingEmptyRows(rows: any[][]): any[][] {
 	return rows.slice(0, end)
 }
 
-function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows: any[][]}>, reconstructedFiles: Map<string, any[][]>): {results: Array<{fileName: string; matches: boolean; details: string}>; debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>}>} {
+function diffRowCells(origRowRaw: any[], reconRowRaw: any[]) {
+	const width = Math.max(origRowRaw.length, reconRowRaw.length, 3)
+
+	const origNorm = normalizeRow(origRowRaw, width)
+	const reconNorm = normalizeRow(reconRowRaw, width)
+
+	const diffs: boolean[] = new Array(width).fill(false)
+	for (let c = 0; c < width; c++) {
+		diffs[c] = JSON.stringify(origNorm[c]) !== JSON.stringify(reconNorm[c])
+	}
+
+	const anyDiff = diffs.some(Boolean)
+	return {width, origNorm, reconNorm, diffs, anyDiff}
+}
+
+function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows: any[][]}>, reconstructedFiles: Map<string, any[][]>): {results: Array<{fileName: string; matches: boolean; details: string}>; debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]; diffs: boolean[]; origNorm: any[]; reconNorm: any[]}>}>} {
 	const results: Array<{fileName: string; matches: boolean; details: string}> = []
-	const debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>}> = []
+	const debugInfo: Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]; diffs: boolean[]; origNorm: any[]; reconNorm: any[]}>}> = []
 
 	console.log("\n========== COMPARISON START ==========")
 	console.log(`Original files: ${originalFiles.length}`)
@@ -284,39 +299,36 @@ function compareReconstructedFiles(originalFiles: Array<{fileName: string; rows:
 		// Line-by-line comparison with normalization
 		let allMatch = true
 		let mismatchCount = 0
-		const misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}> = []
+		const misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]; diffs: boolean[]; origNorm: any[]; reconNorm: any[]}> = []
 
 		for (let i = 0; i < origTrimmed.length; i++) {
 			const origRow = origTrimmed[i] ?? []
 			const reconRow = reconTrimmed[i] ?? []
 
-			// Decide a stable width to compare (handles trailing blanks)
-			const width = Math.max(origRow.length, reconRow.length, 3)
+			const {origNorm, reconNorm, diffs, anyDiff} = diffRowCells(origRow, reconRow)
 
-			const origNorm = normalizeRow(origRow, width)
-			const reconNorm = normalizeRow(reconRow, width)
-
-			const match = JSON.stringify(origNorm) === JSON.stringify(reconNorm)
-
-			if (!match) {
-				if (mismatchCount < 5) {
-					// Show first 5 mismatches with type info
-					console.log(`❌ Row ${i + 1} MISMATCH:`)
-					console.log(`   Original(raw): ${JSON.stringify(origRow)}`)
-					console.log(`   Recon(raw):    ${JSON.stringify(reconRow)}`)
-					console.log(`   Original(norm): ${JSON.stringify(origNorm)}`)
-					console.log(`   Recon(norm):    ${JSON.stringify(reconNorm)}`)
-					console.log(`   DateTime types:`, {
-						orig: typeof origRow?.[1],
-						recon: typeof reconRow?.[1],
-						origVal: origRow?.[1],
-						reconVal: reconRow?.[1],
-					})
-				}
-				mismatchCount++
-				allMatch = false
-				misalignedRows.push({rowIdx: i, original: origRow, reconstructed: reconRow})
+			if (!anyDiff) {
+				continue
 			}
+
+			if (mismatchCount < 5) {
+				// Show first 5 mismatches with type info
+				console.log(`❌ Row ${i + 1} MISMATCH:`)
+				console.log(`   Original(raw): ${JSON.stringify(origRow)}`)
+				console.log(`   Recon(raw):    ${JSON.stringify(reconRow)}`)
+				console.log(`   Original(norm): ${JSON.stringify(origNorm)}`)
+				console.log(`   Recon(norm):    ${JSON.stringify(reconNorm)}`)
+				console.log(`   DateTime types:`, {
+					orig: typeof origRow?.[1],
+					recon: typeof reconRow?.[1],
+					origVal: origRow?.[1],
+					reconVal: reconRow?.[1],
+				})
+				console.log(`   Diff mask: ${diffs.map((d) => (d ? "❌" : "✓")).join("")}`)
+			}
+			mismatchCount++
+			allMatch = false
+			misalignedRows.push({rowIdx: i, original: origRow, reconstructed: reconRow, diffs, origNorm, reconNorm})
 		}
 
 		if (allMatch) {
@@ -486,6 +498,8 @@ interface MergeResult {
 			status: 'pass' | 'fail'
 		}>
 	}>
+	mergeStatus?: "ok" | "failed"
+	mergeError?: string
 }
 
 export default function Home() {
@@ -511,6 +525,8 @@ export default function Home() {
 				reconTrimmedLength: number
 				misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>
 			}>
+			status: "idle" | "running" | "ok" | "failed"
+			error?: string
 		}
 	>>({})
 	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
@@ -552,7 +568,6 @@ export default function Home() {
 		const excelFiles = newFiles.filter((f) => f.name.endsWith(".xls") || f.name.endsWith(".xlsx"))
 
 		if (excelFiles.length === 0) {
-			setError("Please upload Excel files (.xls or .xlsx)")
 			return
 		}
 
@@ -564,7 +579,6 @@ export default function Home() {
 		}))
 
 		setFiles((prev) => [...prev, ...uploadedFiles])
-		setError(null)
 	}
 
 	const removeFile = (id: string) => {
@@ -575,7 +589,6 @@ export default function Home() {
 		try {
 			const result = allResults.find((r) => r.date === date)
 			if (!result) {
-				setError("Result not found for date")
 				return
 			}
 
@@ -599,7 +612,7 @@ export default function Home() {
 			window.URL.revokeObjectURL(url)
 			document.body.removeChild(a)
 		} catch (err) {
-			setError("Failed to download file")
+			console.error("Download failed:", err)
 		}
 	}
 
@@ -607,7 +620,6 @@ export default function Home() {
 		try {
 			const result = allResults.find((r) => r.date === date)
 			if (!result || !result.droppedRows || result.droppedRows.length === 0) {
-				setError("No dropped rows to download")
 				return
 			}
 
@@ -619,16 +631,26 @@ export default function Home() {
 			// Download the file
 			XLSX.writeFile(workbook, `${date}-dropped-rows.xls`)
 		} catch (err) {
-			setError("Failed to download dropped rows file")
+			console.error("Download dropped rows failed:", err)
 		}
 	}
 
-	const runReconstructionComparison = (result: MergeResult) => {
+	const runReconstructionComparison = (result: MergeResult, allOriginalData: Array<{fileName: string; rows: any[][]}>) => {
+		const date = result.date
+
 		try {
-			const date = result.date
+			// Mark as running
+			setReconstructionByDate((prev) => ({
+				...prev,
+				[date]: {
+					...(prev[date] || {comparison: [], debugInfo: []}),
+					status: "running",
+					error: undefined,
+				},
+			}))
 
 			// Only use originals for this specific date (normalize for matching)
-			const originalsForDate = originalFileData.filter((f) => normalizeSourceFile(f.fileName).startsWith(date))
+			const originalsForDate = allOriginalData.filter((f) => normalizeSourceFile(f.fileName).startsWith(date))
 
 			// Reconstruct files from merged + dropped rows
 			const reconstructedFiles = reconstructFilesFromMerged(result.mergedRows, result.droppedRows)
@@ -641,29 +663,36 @@ export default function Home() {
 			}
 
 			if (reconstructedFiles.size === 0) {
-				setError("No files to reconstruct")
+				setReconstructionByDate((prev) => ({
+					...prev,
+					[date]: {
+						...(prev[date] || {comparison: [], debugInfo: []}),
+						status: "failed",
+						error: "No files to reconstruct",
+					},
+				}))
 				return
 			}
 
 			// Compare reconstructed files with originals for this date only
 			const {results: comparisonResults, debugInfo} = compareReconstructedFiles(originalsForDate, reconstructedFiles)
 
+			const allMatch = comparisonResults.length > 0 && comparisonResults.every((r) => r.matches)
+
 			setReconstructionByDate((prev) => ({
 				...prev,
-				[date]: {comparison: comparisonResults, debugInfo},
+				[date]: {
+					comparison: comparisonResults,
+					debugInfo,
+					status: allMatch ? "ok" : "failed",
+					error: allMatch
+						? undefined
+						: comparisonResults
+								.filter((r) => !r.matches)
+								.map((r) => `${r.fileName}: ${r.details}`)
+								.join("; "),
+				},
 			}))
-
-			const allMatch = comparisonResults.length > 0 && comparisonResults.every((r) => r.matches)
-			if (allMatch) {
-				setSuccess(true)
-				setError(null)
-			} else {
-				const failedFiles = comparisonResults
-					.filter((r) => !r.matches)
-					.map((r) => `${r.fileName}: ${r.details}`)
-					.join("; ")
-				setError(`Reconstruction verification failed: ${failedFiles}`)
-			}
 
 			// Optionally pick the first file for viewing
 			if (debugInfo.length > 0) {
@@ -671,7 +700,14 @@ export default function Home() {
 			}
 		} catch (err) {
 			console.error(err)
-			setError("Failed to run reconstruction comparison")
+			setReconstructionByDate((prev) => ({
+				...prev,
+				[date]: {
+					...(prev[date] || {comparison: [], debugInfo: []}),
+					status: "failed",
+					error: "Failed to run reconstruction comparison",
+				},
+			}))
 		}
 	}
 
@@ -679,7 +715,6 @@ export default function Home() {
 		try {
 			const result = allResults.find((r) => r.date === date)
 			if (!result) {
-				setError("Result not found for date")
 				return
 			}
 
@@ -687,7 +722,6 @@ export default function Home() {
 			const reconstructedFiles = reconstructFilesFromMerged(result.mergedRows, result.droppedRows)
 
 			if (reconstructedFiles.size === 0) {
-				setError("No files to reconstruct")
 				return
 			}
 
@@ -712,18 +746,14 @@ export default function Home() {
 				// Small delay between downloads
 				setTimeout(() => {}, 100)
 			}
-
-			setSuccess(true)
 		} catch (err) {
 			console.error("Error during reconstruction download:", err)
-			setError("Failed to download reconstructed files")
 		}
 	}
 
 	const downloadAllFiles = async () => {
 		try {
 			if (allResults.length === 0) {
-				setError("No results to download")
 				return
 			}
 
@@ -748,7 +778,7 @@ export default function Home() {
 				await new Promise((resolve) => setTimeout(resolve, 100))
 			}
 		} catch (err) {
-			setError("Failed to download all files")
+			console.error("Download all files failed:", err)
 		}
 	}
 
@@ -761,13 +791,10 @@ export default function Home() {
 
 	const handleMergeAndAnalyze = async () => {
 		if (files.length === 0) {
-			setError("Please upload at least one file")
 			return
 		}
 
 		setIsProcessing(true)
-		setError(null)
-		setSuccess(false)
 
 		try {
 			// Step 1: Parse original files
@@ -950,8 +977,8 @@ export default function Home() {
 				const allOriginalRanges = Array.from(originalFileFocalRanges.values()).flat()
 				const focalColorMap = buildFocalColorMap(mergedFocalRanges, allOriginalRanges)
 
-				// Add this date's result
-				results.push({
+				// Create result object for this date
+				const result: MergeResult = {
 					date: dateResult.date,
 					metadata: {
 						standard: dateResult.standardBase64,
@@ -965,22 +992,41 @@ export default function Home() {
 					originalFileFocalRanges,
 					focalColorMap,
 					validations: dateResult.validations || [],
-				})
+				mergeStatus: "ok",
+				mergeError: undefined,
 			}
 
-			setAllResults(results)
-			setSuccess(true)
+			// Add this date's result immediately to state (incremental update)
+			setAllResults((prev) => [...prev, result])
 
-			// Automatically run reconstruction comparison for each date
-			for (const result of results) {
-				runReconstructionComparison(result)
-			}
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to process files")
-		} finally {
-			setIsProcessing(false)
+			// Run reconstruction comparison immediately for this date (pass originalData directly to avoid stale state)
+			runReconstructionComparison(result, originalData)
 		}
+	} catch (err) {
+		const errorMessage = err instanceof Error ? err.message : "Failed to process files"
+		console.error(errorMessage, err)
+		// Push a failed result so user sees per-date error context
+		setAllResults((prev) => [
+			...prev,
+			{
+				date: "Unknown",
+				metadata: {standard: "", metadata: ""},
+				mergedRows: [],
+				sourceFileBlocks: [],
+				droppedRows: [],
+				analysis: {originalFiles: [], totalOriginalRows: 0, totalMergedRows: 0},
+				mergedFocalRanges: [],
+				originalFileFocalRanges: new Map(),
+				focalColorMap: new Map(),
+				validations: [],
+				mergeStatus: "failed",
+				mergeError: errorMessage,
+			},
+		])
+	} finally {
+		setIsProcessing(false)
 	}
+}
 
 	return (
 		<div className="flex flex-col min-h-screen gap-6">
@@ -1012,26 +1058,6 @@ export default function Home() {
 					<h2 className="text-2xl font-semibold mb-2">Merge & Analysis</h2>
 					<p className="text-muted-foreground">Upload original files, merge them, and analyze which rows were kept vs dropped.</p>
 				</div>
-
-			{error && (
-				<div className="flex items-center gap-2 p-3 rounded-lg bg-destructive/10 text-destructive border border-destructive/20">
-					<AlertCircle className="w-4 h-4 flex-shrink-0" />
-					<span className="text-sm">{error}</span>
-					<button onClick={() => setError(null)} className="ml-auto p-1 hover:bg-destructive/20 rounded">
-						<X className="w-4 h-4" />
-					</button>
-				</div>
-			)}
-
-			{success && (
-				<div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 text-green-700 border border-green-500/20">
-					<CheckCircle className="w-4 h-4 flex-shrink-0" />
-					<span className="text-sm">Merge complete and analysis finished! Check the results below.</span>
-					<button onClick={() => setSuccess(false)} className="ml-auto p-1 hover:bg-green-500/20 rounded">
-						<X className="w-4 h-4" />
-					</button>
-				</div>
-			)}
 
 			{/* File Upload - Collapsible */}
 			<Collapsible defaultOpen={true}>
@@ -1093,8 +1119,11 @@ export default function Home() {
 					variant="outline"
 					onClick={() => {
 						setFiles([])
-						setSuccess(false)
 						setAllResults([])
+						setReconstructionByDate({})
+						setOriginalFileData([])
+						setSelectedSourceFile(null)
+						setComparisonViewFile(null)
 					}}
 					disabled={isProcessing}
 				>
@@ -1131,6 +1160,46 @@ export default function Home() {
 							<CollapsibleContent className="mt-2">
 								<Card>
 									<CardContent className="pt-6 space-y-4">
+										{/* Merge Status Block */}
+										{result.mergeStatus === "failed" && result.mergeError && (
+											<div className="flex items-start gap-2 p-3 rounded-lg bg-destructive/10 text-destructive border border-destructive/20">
+												<AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+												<div className="text-sm">
+													<p className="font-semibold">Merge Failed</p>
+													<p className="text-xs mt-1">{result.mergeError}</p>
+												</div>
+											</div>
+										)}
+
+										{/* Reconstruction Status Block */}
+										{reconstructionByDate[result.date] && (
+											<div>
+												{reconstructionByDate[result.date].status === "running" && (
+													<div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 text-blue-700 border border-blue-500/20">
+														<div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+														<span className="text-sm">Running reconstruction verification...</span>
+													</div>
+												)}
+
+												{reconstructionByDate[result.date].status === "ok" && (
+													<div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 text-green-700 border border-green-500/20">
+														<CheckCircle className="w-4 h-4 flex-shrink-0" />
+														<span className="text-sm">Reconstruction verification passed!</span>
+													</div>
+												)}
+
+												{reconstructionByDate[result.date].status === "failed" && reconstructionByDate[result.date].error && (
+													<div className="flex items-start gap-2 p-3 rounded-lg bg-destructive/10 text-destructive border border-destructive/20">
+														<AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+														<div className="text-sm">
+															<p className="font-semibold">Reconstruction Failed</p>
+															<p className="text-xs mt-1">{reconstructionByDate[result.date].error}</p>
+														</div>
+													</div>
+												)}
+											</div>
+										)}
+
 										{/* Validation Results - Collapsible */}
 										{result.validations && result.validations.length > 0 && (
 											<Collapsible defaultOpen={!result.validations.every((v) => v.passed)}>
@@ -1382,6 +1451,18 @@ export default function Home() {
 																					realMisalignments.push(mismatch)
 																				})
 
+																				// Cell renderer component for highlighted diffs
+																				const Cell = ({value, isDiff}: {value: any; isDiff: boolean}) => (
+																					<span
+																						className={cn(
+																							"px-1 py-0.5 rounded inline-block",
+																							isDiff ? "bg-yellow-200 text-yellow-950 font-semibold" : "text-gray-700"
+																						)}
+																					>
+																						{JSON.stringify(value ?? "")}
+																					</span>
+																				)
+
 																				return (
 																					<>
 																						{commentMisalignments.length > 0 && (
@@ -1397,38 +1478,29 @@ export default function Home() {
 																										<div className="text-xs text-yellow-900 mb-2 p-2 rounded bg-yellow-100">
 																											<p className="font-semibold mb-1">ℹ️ These rows match on the first 3 columns but the original has extra comment columns (4th column) that are not in the reconstructed file.</p>
 																										</div>
-																										{commentMisalignments.map((mismatch: any, idx: number) => {
-																											const formatDisplayValue = (val: any): any => {
-																												if (typeof val === 'number' && val > 1000 && val < 50000) {
-																													return formatIsoDate(excelDateToJSDate(val))
-																												}
-																												return val
-																											}
-
-																											return (
-																												<div key={idx} className="border border-yellow-400 rounded p-2 bg-white">
-																													<div className="font-semibold text-xs text-yellow-900 mb-2">Row {mismatch.rowIdx}</div>
-																													<div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-																														<div>
-																															<div className="font-semibold text-gray-700 mb-1">Original File:</div>
-																															<div className="text-gray-700 bg-orange-50 p-2 rounded break-all border-l-4 border-orange-400">
-																																[ {mismatch.original.slice(0, 3).map((v: any, i: number) => (
-																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(formatDisplayValue(v))}</span>
-																																))}<span className="bg-orange-200 px-1 rounded"> {JSON.stringify(mismatch.original[3])} </span>]
-																															</div>
+																										{commentMisalignments.map((mismatch: any, idx: number) => (
+																											<div key={idx} className="border border-yellow-400 rounded p-2 bg-white">
+																												<div className="font-semibold text-xs text-yellow-900 mb-2">Row {mismatch.rowIdx}</div>
+																												<div className="grid grid-cols-2 gap-2">
+																													<div>
+																														<div className="font-semibold text-gray-700 text-xs mb-1">Original File:</div>
+																														<div className="flex flex-wrap gap-1 font-mono text-[10px] bg-orange-50 p-2 rounded border-l-4 border-orange-400">
+																															{mismatch.origNorm.map((v: any, c: number) => (
+																																<Cell key={c} value={v} isDiff={mismatch.diffs?.[c]} />
+																															))}
 																														</div>
-																														<div>
-																															<div className="font-semibold text-gray-700 mb-1">Reconstructed File:</div>
-																															<div className="text-gray-700 bg-blue-50 p-2 rounded break-all border-l-4 border-blue-400">
-																																[ {mismatch.reconstructed.map((v: any, i: number) => (
-																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(v)}</span>
-																																))} ]
-																															</div>
+																													</div>
+																													<div>
+																														<div className="font-semibold text-gray-700 text-xs mb-1">Reconstructed File:</div>
+																														<div className="flex flex-wrap gap-1 font-mono text-[10px] bg-blue-50 p-2 rounded border-l-4 border-blue-400">
+																															{mismatch.reconNorm.map((v: any, c: number) => (
+																																<Cell key={c} value={v} isDiff={mismatch.diffs?.[c]} />
+																															))}
 																														</div>
 																													</div>
 																												</div>
-																											)
-																										})}
+																											</div>
+																										))}
 																									</div>
 																								</CollapsibleContent>
 																							</Collapsible>
@@ -1444,45 +1516,35 @@ export default function Home() {
 																								</CollapsibleTrigger>
 																								<CollapsibleContent className="mt-2">
 																									<div className="p-2 rounded border border-red-300 space-y-2 max-h-96 overflow-y-auto bg-red-50">
-																										{realMisalignments.map((mismatch: any, idx: number) => {
-																											const formatDisplayValue = (val: any): any => {
-																												if (typeof val === 'number' && val > 1000 && val < 50000) {
-																													return formatIsoDate(excelDateToJSDate(val))
-																												}
-																												return val
-																											}
-
-																											return (
-																												<div key={idx} className="border border-red-400 rounded p-2 bg-white">
-																													<div className="font-semibold text-xs text-red-900 mb-2">Row {mismatch.rowIdx}</div>
-																													<div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-																														<div>
-																															<div className="font-semibold text-gray-700 mb-1">Original File:</div>
-																															<div className="text-gray-700 bg-red-50 p-2 rounded break-all border-l-4 border-red-400">
-																																[ {mismatch.original.map((v: any, i: number) => (
-																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(formatDisplayValue(v))}</span>
-																																))} ]
-																															</div>
+																										{realMisalignments.map((mismatch: any, idx: number) => (
+																											<div key={idx} className="border border-red-400 rounded p-2 bg-white">
+																												<div className="font-semibold text-xs text-red-900 mb-2">Row {mismatch.rowIdx}</div>
+																												<div className="grid grid-cols-2 gap-2">
+																													<div>
+																														<div className="font-semibold text-gray-700 text-xs mb-1">Original File:</div>
+																														<div className="flex flex-wrap gap-1 font-mono text-[10px] bg-red-50 p-2 rounded border-l-4 border-red-400">
+																															{mismatch.origNorm.map((v: any, c: number) => (
+																																<Cell key={c} value={v} isDiff={mismatch.diffs?.[c]} />
+																															))}
 																														</div>
-																														<div>
-																															<div className="font-semibold text-gray-700 mb-1">Reconstructed File:</div>
-																															<div className="text-gray-700 bg-blue-50 p-2 rounded break-all border-l-4 border-blue-400">
-																																[ {mismatch.reconstructed.map((v: any, i: number) => (
-																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(v)}</span>
-																																))} ]
-																															</div>
+																													</div>
+																													<div>
+																														<div className="font-semibold text-gray-700 text-xs mb-1">Reconstructed File:</div>
+																														<div className="flex flex-wrap gap-1 font-mono text-[10px] bg-blue-50 p-2 rounded border-l-4 border-blue-400">
+																															{mismatch.reconNorm.map((v: any, c: number) => (
+																																<Cell key={c} value={v} isDiff={mismatch.diffs?.[c]} />
+																															))}
 																														</div>
 																													</div>
 																												</div>
-																											)
-																										})}
+																											</div>
+																										))}
 																									</div>
 																								</CollapsibleContent>
 																							</Collapsible>
 																						)}
 																					</>
-																				)
-																			})()}
+																				)																			})()}
 																		</div>
 																	) : (
 																		<div className="p-2 rounded border border-green-300 bg-green-50 text-xs text-green-900">
