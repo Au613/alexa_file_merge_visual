@@ -43,6 +43,13 @@ interface SourceFileBlock {
 	rowCount: number
 }
 
+// Normalize source file names to strip paths and handle casing
+function normalizeSourceFile(value: any): string {
+	const str = String(value ?? "")
+	const baseName = str.split(/[\\\/]/).pop() ?? str // strip folders
+	return baseName.trim()
+}
+
 function excelDateToJSDate(serial: number): Date {
 	const utcDays = Math.floor(serial - 25569)
 	const utcValue = utcDays * 86400
@@ -71,7 +78,7 @@ function reconstructFilesFromMerged(mergedRows: any[][], droppedRows: any[][]): 
 
 	// Process merged rows first
 	for (const row of mergedRows) {
-		const sourceFile = String(row[3] || "")
+		const sourceFile = normalizeSourceFile(row[3])
 		const originalRowNum = Number(row[4] || 0) // This is 1-based from API
 		const key = `${sourceFile}|${originalRowNum - 1}` // Use 0-based for tracking
 		
@@ -97,7 +104,7 @@ function reconstructFilesFromMerged(mergedRows: any[][], droppedRows: any[][]): 
 
 	// Process dropped rows (skip if already in merged)
 	for (const row of droppedDataRows) {
-		const sourceFile = String(row[3] || "")
+		const sourceFile = normalizeSourceFile(row[3])
 		const originalRowNum = Number(row[4] || 0) // This is 0-based from frontend
 		const key = `${sourceFile}|${originalRowNum}`
 
@@ -490,8 +497,22 @@ export default function Home() {
 	const [isProcessing, setIsProcessing] = useState(false)
 	const [selectedSourceFile, setSelectedSourceFile] = useState<string | null>(null)
 	const [originalFileData, setOriginalFileData] = useState<Array<{fileName: string; rows: any[][]}>>([])
-	const [reconstructionComparison, setReconstructionComparison] = useState<Array<{fileName: string; matches: boolean; details: string}> | null>(null)
-	const [reconstructionDebugInfo, setReconstructionDebugInfo] = useState<Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number; misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>}> | null>(null)
+	const [reconstructionByDate, setReconstructionByDate] = useState<Record<
+		string,
+		{
+			comparison: Array<{fileName: string; matches: boolean; details: string}>
+			debugInfo: Array<{
+				fileName: string
+				firstOriginal10: any[][]
+				firstReconstructed10: any[][]
+				lastOriginal10: any[][]
+				lastReconstructed10: any[][]
+				origTrimmedLength: number
+				reconTrimmedLength: number
+				misalignedRows: Array<{rowIdx: number; original: any[]; reconstructed: any[]}>
+			}>
+		}
+	>>({})
 	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
 	const [pointSampleFilter, setPointSampleFilter] = useState<'all' | 'passed' | 'failed'>('all')
 	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
@@ -602,27 +623,35 @@ export default function Home() {
 		}
 	}
 
-	const runReconstructionComparison = (date: string) => {
+	const runReconstructionComparison = (result: MergeResult) => {
 		try {
-			const result = allResults.find((r) => r.date === date)
-			if (!result) {
-				setError("Result not found for date")
-				return
-			}
+			const date = result.date
+
+			// Only use originals for this specific date (normalize for matching)
+			const originalsForDate = originalFileData.filter((f) => normalizeSourceFile(f.fileName).startsWith(date))
 
 			// Reconstruct files from merged + dropped rows
 			const reconstructedFiles = reconstructFilesFromMerged(result.mergedRows, result.droppedRows)
+
+			// Only keep reconstructed files that match this date's originals (normalize for matching)
+			for (const key of Array.from(reconstructedFiles.keys())) {
+				if (!normalizeSourceFile(key).startsWith(date)) {
+					reconstructedFiles.delete(key)
+				}
+			}
 
 			if (reconstructedFiles.size === 0) {
 				setError("No files to reconstruct")
 				return
 			}
 
-			// Compare reconstructed files with originals
-			const {results: comparisonResults, debugInfo} = compareReconstructedFiles(originalFileData, reconstructedFiles)
+			// Compare reconstructed files with originals for this date only
+			const {results: comparisonResults, debugInfo} = compareReconstructedFiles(originalsForDate, reconstructedFiles)
 
-			setReconstructionComparison(comparisonResults)
-			setReconstructionDebugInfo(debugInfo)
+			setReconstructionByDate((prev) => ({
+				...prev,
+				[date]: {comparison: comparisonResults, debugInfo},
+			}))
 
 			const allMatch = comparisonResults.length > 0 && comparisonResults.every((r) => r.matches)
 			if (allMatch) {
@@ -636,7 +665,7 @@ export default function Home() {
 				setError(`Reconstruction verification failed: ${failedFiles}`)
 			}
 
-			// Optionally pick the first file for viewing (if you still use the modal)
+			// Optionally pick the first file for viewing
 			if (debugInfo.length > 0) {
 				setComparisonViewFile(debugInfo[0].fileName)
 			}
@@ -755,7 +784,6 @@ export default function Home() {
 
 			// Store original file data for reconstruction comparison
 			setOriginalFileData(originalData)
-			setReconstructionComparison(null)
 
 			// Step 2: Send to merge API (new per-date structure)
 			const formData = new FormData()
@@ -792,6 +820,9 @@ export default function Home() {
 				const mergedBuffer = bytes.buffer as ArrayBuffer
 				const mergedRows = parseExcelFile(Buffer.from(mergedBuffer))
 
+				// Filter originals to only those for this specific date (normalize filenames for matching)
+				const dateOriginalData = originalData.filter((f) => normalizeSourceFile(f.fileName).startsWith(dateResult.date))
+
 				// Build source map from merged file
 				// Note: originalRowNumber (row[4]) is 1-based from API, so subtract 1 to get 0-based index
 				const sourceMap = new Map<string, Set<number>>()
@@ -799,20 +830,23 @@ export default function Home() {
 				for (let i = 0; i < mergedRows.length; i++) {
 					const row = mergedRows[i]
 					if (row.length >= 5) {
-						const sourceFile = String(row[3])
+						const sourceFile = normalizeSourceFile(row[3])
 						const originalRowNum = Number(row[4]) // This is 1-based from API
 						const key = `${sourceFile}|${originalRowNum - 1}` // Convert to 0-based for matching
-						sourceMap.set(key, new Set([i]))
+						const set = sourceMap.get(key)
+						if (set) set.add(i)
+						else sourceMap.set(key, new Set([i]))
 					}
 				}
 
-				// Analyze each original file
-				const analysisResults = originalData.map((data, fileIdx) => {
+				// Analyze only the original files for this date
+				const analysisResults = dateOriginalData.map((data, fileIdx) => {
+					const normFile = normalizeSourceFile(data.fileName)
 					const keptIndices: number[] = []
 					const droppedIndices: number[] = []
 
 					for (let rowIdx = 0; rowIdx < data.rows.length; rowIdx++) {
-						const key = `${data.fileName}|${rowIdx}`
+						const key = `${normFile}|${rowIdx}`
 						if (sourceMap.has(key)) {
 							keptIndices.push(rowIdx)
 						} else {
@@ -849,7 +883,7 @@ export default function Home() {
 
 				for (let i = 0; i < mergedRows.length; i++) {
 					const row = mergedRows[i]
-					const sourceFile = String(row[3] || "")
+					const sourceFile = normalizeSourceFile(row[3])
 					const timestamp = String(row[1] || "")
 
 					if (sourceFile !== currentFile && currentFile !== null) {
@@ -888,7 +922,7 @@ export default function Home() {
 				const droppedRows: any[][] = [["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"]]
 
 				analysisResults.forEach((fileAnalysis) => {
-					const originalFile = originalData[fileAnalysis.fileIndex]
+					const originalFile = dateOriginalData[fileAnalysis.fileIndex]
 					if (!originalFile) return
 
 					fileAnalysis.droppedIndices.forEach((rowIdx) => {
@@ -905,9 +939,9 @@ export default function Home() {
 				// Extract focal follow ranges
 				const mergedFocalRanges = extractFocalFollowRanges(mergedRows)
 
-				// Extract focal ranges from original files
+				// Extract focal ranges from original files (only those for this specific date)
 				const originalFileFocalRanges = new Map<string, FocalFollowRange[]>()
-				originalData.forEach((data) => {
+				dateOriginalData.forEach((data) => {
 					const ranges = extractFocalFollowRanges(data.rows)
 					originalFileFocalRanges.set(data.fileName, ranges)
 				})
@@ -936,6 +970,11 @@ export default function Home() {
 
 			setAllResults(results)
 			setSuccess(true)
+
+			// Automatically run reconstruction comparison for each date
+			for (const result of results) {
+				runReconstructionComparison(result)
+			}
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Failed to process files")
 		} finally {
@@ -1151,18 +1190,18 @@ export default function Home() {
 																		</div>
 																	</div>
 
-																	<div className="overflow-x-auto border rounded-lg">
+																	<div className="overflow-x-auto border rounded-lg max-h-96">
 																		<table className="w-full text-xs">
-																			<thead className="border-b">
+																			<thead className="border-b sticky top-0 bg-slate-900 text-white">
 																				<tr>
-																					<th className="px-3 py-2 text-left font-semibold">Row 1</th>
-																					<th className="px-3 py-2 text-left font-semibold">Time 1</th>
-																					<th className="px-3 py-2 text-left font-semibold">Y Data 1</th>
-																					<th className="px-3 py-2 text-left font-semibold">Row 2</th>
-																					<th className="px-3 py-2 text-left font-semibold">Time 2</th>
-																					<th className="px-3 py-2 text-left font-semibold">Y Data 2</th>
-																					<th className="px-3 py-2 text-left font-semibold">Duration (min)</th>
-																					<th className="px-3 py-2 text-left font-semibold">Valid (2-3 min)</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-12">Row 1</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-24">Time 1</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-24">Y Data 1</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-12">Row 2</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-24">Time 2</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-24">Y Data 2</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-20">Duration (min)</th>
+																					<th className="px-3 py-2 text-left font-semibold min-w-28">Valid (2-3 min)</th>
 																				</tr>
 																			</thead>
 																			<tbody>
@@ -1279,53 +1318,56 @@ export default function Home() {
 										)}
 
 										{/* Debug Info - Collapsible */}
-										
-										{reconstructionDebugInfo && reconstructionDebugInfo.length > 0 && (
-											<Collapsible defaultOpen={!reconstructionComparison?.every((r) => r.matches)}>
-												<CollapsibleTrigger className="w-full">
-													<div className="flex items-center gap-2 p-3 rounded-lg border border-slate-200 cursor-pointer transition-colors">
-														<ChevronDown className="w-4 h-4 transition-transform" />
-														<span className="font-semibold text-sm">Reconstruction Debug Info</span>
-														<Badge variant="secondary" className="ml-auto text-xs">
-															{reconstructionDebugInfo.length} files
-														</Badge>
-													</div>
-												</CollapsibleTrigger>
-												<CollapsibleContent className="mt-2 ml-2">
-													<div className="space-y-4">
-														{reconstructionDebugInfo.map((debug) => (
-															<div key={debug.fileName} className=" p-3 rounded-lg border border-slate-200">
-																<p className="font-semibold text-sm mb-3">{debug.fileName}</p>
-																
-																<div className="grid grid-cols-2 gap-4 text-xs mb-3">
-																	<div>
-																		<p className="font-semibold text-gray-700 mb-1">After Trim:</p>
-																		<p className="text-gray-600">Original: <span className="font-mono font-bold">{debug.origTrimmedLength}</span> rows</p>
-																		<p className="text-gray-600">Reconstructed: <span className="font-mono font-bold">{debug.reconTrimmedLength}</span> rows</p>
-																		<p className="text-red-600 font-semibold mt-1">Difference: <span className="font-mono">{Math.abs(debug.origTrimmedLength - debug.reconTrimmedLength)}</span> rows</p>
+										{(() => {
+											const recon = reconstructionByDate[result.date]
+											const reconstructionComparison = recon?.comparison
+											const reconstructionDebugInfo = recon?.debugInfo
+											return reconstructionDebugInfo && reconstructionDebugInfo.length > 0 && (
+												<Collapsible defaultOpen={!reconstructionComparison?.every((r: any) => r.matches)}>
+													<CollapsibleTrigger className="w-full">
+														<div className="flex items-center gap-2 p-3 rounded-lg border border-slate-200 cursor-pointer transition-colors">
+															<ChevronDown className="w-4 h-4 transition-transform" />
+															<span className="font-semibold text-sm">Reconstruction Debug Info</span>
+															<Badge variant="secondary" className="ml-auto text-xs">
+																{reconstructionDebugInfo.length} files
+															</Badge>
+														</div>
+													</CollapsibleTrigger>
+													<CollapsibleContent className="mt-2 ml-2">
+														<div className="space-y-4">
+															{reconstructionDebugInfo.map((debug: any) => (
+																<div key={debug.fileName} className=" p-3 rounded-lg border border-slate-200">
+																	<p className="font-semibold text-sm mb-3">{debug.fileName}</p>
+																	
+																	<div className="grid grid-cols-2 gap-4 text-xs mb-3">
+																		<div>
+																			<p className="font-semibold text-gray-700 mb-1">After Trim:</p>
+																			<p className="text-gray-600">Original: <span className="font-mono font-bold">{debug.origTrimmedLength}</span> rows</p>
+																			<p className="text-gray-600">Reconstructed: <span className="font-mono font-bold">{debug.reconTrimmedLength}</span> rows</p>
+																			<p className="text-red-600 font-semibold mt-1">Difference: <span className="font-mono">{Math.abs(debug.origTrimmedLength - debug.reconTrimmedLength)}</span> rows</p>
+																		</div>
+																		<div>
+																			<p className="font-semibold text-gray-700 mb-1">Before Trim:</p>
+																			<p className="text-gray-600">Original: <span className="font-mono font-bold">{debug.lastOriginal10.length}</span> rows</p>
+																			<p className="text-gray-600">Reconstructed: <span className="font-mono font-bold">{debug.lastReconstructed10.length}</span> rows</p>
+																		</div>
 																	</div>
-																	<div>
-																		<p className="font-semibold text-gray-700 mb-1">Before Trim:</p>
-																		<p className="text-gray-600">Original: <span className="font-mono font-bold">{debug.lastOriginal10.length}</span> rows</p>
-																		<p className="text-gray-600">Reconstructed: <span className="font-mono font-bold">{debug.lastReconstructed10.length}</span> rows</p>
-																	</div>
-																</div>
 
-																<div className="space-y-3">
-																	{debug.misalignedRows && debug.misalignedRows.length > 0 ? (
-																		<div className="space-y-3">
+																	<div className="space-y-3">
+																		{debug.misalignedRows && debug.misalignedRows.length > 0 ? (
+																			<div className="space-y-3">
 																			{(() => {
 																				const commentMisalignments: typeof debug.misalignedRows = []
 																				const realMisalignments: typeof debug.misalignedRows = []
 
-																				debug.misalignedRows.forEach((mismatch) => {
+																				debug.misalignedRows.forEach((mismatch: any) => {
 																					// Check if only difference is 4th column
 																					const origHas4th = mismatch.original.length > 3
 																					const reconHas4th = mismatch.reconstructed.length > 3
 																					
 																					if (origHas4th && !reconHas4th && mismatch.original.length === 4 && mismatch.reconstructed.length === 3) {
 																						// Check if first 3 columns match
-																						const first3Match = mismatch.original.slice(0, 3).every((val, i) => {
+																						const first3Match = mismatch.original.slice(0, 3).every((val: any, i: number) => {
 																							const origVal = formatIsoDate(excelDateToJSDate(typeof val === 'number' ? val : parseInt(String(val))))
 																							const reconVal = String(mismatch.reconstructed[i])
 																							return origVal === reconVal || val === mismatch.reconstructed[i]
@@ -1355,7 +1397,7 @@ export default function Home() {
 																										<div className="text-xs text-yellow-900 mb-2 p-2 rounded bg-yellow-100">
 																											<p className="font-semibold mb-1">ℹ️ These rows match on the first 3 columns but the original has extra comment columns (4th column) that are not in the reconstructed file.</p>
 																										</div>
-																										{commentMisalignments.map((mismatch, idx) => {
+																										{commentMisalignments.map((mismatch: any, idx: number) => {
 																											const formatDisplayValue = (val: any): any => {
 																												if (typeof val === 'number' && val > 1000 && val < 50000) {
 																													return formatIsoDate(excelDateToJSDate(val))
@@ -1370,7 +1412,7 @@ export default function Home() {
 																														<div>
 																															<div className="font-semibold text-gray-700 mb-1">Original File:</div>
 																															<div className="text-gray-700 bg-orange-50 p-2 rounded break-all border-l-4 border-orange-400">
-																																[ {mismatch.original.slice(0, 3).map((v, i) => (
+																																[ {mismatch.original.slice(0, 3).map((v: any, i: number) => (
 																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(formatDisplayValue(v))}</span>
 																																))}<span className="bg-orange-200 px-1 rounded"> {JSON.stringify(mismatch.original[3])} </span>]
 																															</div>
@@ -1378,7 +1420,7 @@ export default function Home() {
 																														<div>
 																															<div className="font-semibold text-gray-700 mb-1">Reconstructed File:</div>
 																															<div className="text-gray-700 bg-blue-50 p-2 rounded break-all border-l-4 border-blue-400">
-																																[ {mismatch.reconstructed.map((v, i) => (
+																																[ {mismatch.reconstructed.map((v: any, i: number) => (
 																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(v)}</span>
 																																))} ]
 																															</div>
@@ -1402,7 +1444,7 @@ export default function Home() {
 																								</CollapsibleTrigger>
 																								<CollapsibleContent className="mt-2">
 																									<div className="p-2 rounded border border-red-300 space-y-2 max-h-96 overflow-y-auto bg-red-50">
-																										{realMisalignments.map((mismatch, idx) => {
+																										{realMisalignments.map((mismatch: any, idx: number) => {
 																											const formatDisplayValue = (val: any): any => {
 																												if (typeof val === 'number' && val > 1000 && val < 50000) {
 																													return formatIsoDate(excelDateToJSDate(val))
@@ -1417,7 +1459,7 @@ export default function Home() {
 																														<div>
 																															<div className="font-semibold text-gray-700 mb-1">Original File:</div>
 																															<div className="text-gray-700 bg-red-50 p-2 rounded break-all border-l-4 border-red-400">
-																																[ {mismatch.original.map((v, i) => (
+																																[ {mismatch.original.map((v: any, i: number) => (
 																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(formatDisplayValue(v))}</span>
 																																))} ]
 																															</div>
@@ -1425,7 +1467,7 @@ export default function Home() {
 																														<div>
 																															<div className="font-semibold text-gray-700 mb-1">Reconstructed File:</div>
 																															<div className="text-gray-700 bg-blue-50 p-2 rounded break-all border-l-4 border-blue-400">
-																																[ {mismatch.reconstructed.map((v, i) => (
+																																[ {mismatch.reconstructed.map((v: any, i: number) => (
 																																	<span key={i}>{i > 0 ? ', ' : ''}{JSON.stringify(v)}</span>
 																																))} ]
 																															</div>
@@ -1453,34 +1495,8 @@ export default function Home() {
 													</div>
 												</CollapsibleContent>
 											</Collapsible>
-										)}
-
-										{/* Comparison View Modal */}
-										{comparisonViewFile && reconstructionDebugInfo && (
-											<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-												<Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
-													<div className="flex items-center justify-between p-4 border-b ">
-														<div className="flex items-center gap-3">
-															<h2 className="text-lg font-semibold">Row Comparison</h2>
-															<select
-																value={comparisonViewFile}
-																onChange={(e) => setComparisonViewFile(e.target.value)}
-																className="text-sm border border-slate-300 rounded-md p-1.5 "
-															>
-																{reconstructionDebugInfo.map((debug) => (
-																	<option key={debug.fileName} value={debug.fileName}>
-																		{debug.fileName}
-																	</option>
-																))}
-															</select>
-														</div>
-														<button onClick={() => setComparisonViewFile(null)} className="p-1 hover:bg-slate-200 rounded">
-															<X className="w-5 h-5" />
-														</button>
-													</div>
-												</Card>
-											</div>
-										)}
+										)
+										})()}
 
 										{/* Downloads & Verification */}
 										<div className="bg-green-500/5 border border-green-500/20 rounded-lg p-4 space-y-4">
@@ -1488,17 +1504,21 @@ export default function Home() {
 												<span className="font-semibold text-sm">Downloads & Verification</span>
 
 												{/* Overall status (green only if EVERYTHING matches) */}
-												{reconstructionComparison && reconstructionComparison.length > 0 && (
-													<Badge
-														variant="secondary"
-														className={cn(
-															"text-xs",
-															reconstructionComparison.every((r) => r.matches) ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800"
-														)}
-													>
-														{reconstructionComparison.every((r) => r.matches) ? "✅ Reconstruction Verified" : "❌ Reconstruction Issues"}
-													</Badge>
-												)}
+												{(() => {
+													const recon = reconstructionByDate[result.date]
+													const reconstructionComparison = recon?.comparison
+													return reconstructionComparison && reconstructionComparison.length > 0 && (
+														<Badge
+															variant="secondary"
+															className={cn(
+																"text-xs",
+																reconstructionComparison.every((r: any) => r.matches) ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800"
+															)}
+														>
+															{reconstructionComparison.every((r: any) => r.matches) ? "✅ Reconstruction Verified" : "❌ Reconstruction Issues"}
+														</Badge>
+													)
+												})()}
 											</div>
 
 											{/* Merged Files */}
@@ -1564,15 +1584,6 @@ export default function Home() {
 													</div>
 
 													<div className="flex gap-2 shrink-0">
-														<Button
-															onClick={() => runReconstructionComparison(result.date)}
-															variant="outline"
-															size="sm"
-															disabled={originalFileData.length === 0}
-														>
-															<CheckCircle className="w-4 h-4 mr-2" />
-															Run Comparison
-														</Button>
 														<Button
 															onClick={() => downloadReconstructedFilesOnly(result.date)}
 															variant="outline"
