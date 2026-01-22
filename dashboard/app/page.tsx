@@ -7,8 +7,9 @@ import {Button} from "@/components/ui/button"
 import {Card, CardContent} from "@/components/ui/card"
 import {Badge} from "@/components/ui/badge"
 import {Collapsible, CollapsibleTrigger, CollapsibleContent} from "@/components/ui/collapsible"
-import {cn} from "@/lib/utils"
+import {cn, extractFocalFollowRanges, buildFocalColorMap, FocalFollowRange} from "@/lib/utils"
 import {ValidationPanel} from "@/components/ValidationPanel"
+import {FocalFollowLegend} from "@/components/FocalFollowLegend"
 import * as XLSX from "xlsx"
 
 interface UploadedFile {
@@ -445,6 +446,9 @@ interface MergeResult {
 	sourceFileBlocks: SourceFileBlock[]
 	droppedRows: any[][]
 	analysis: MergeAnalysis
+	mergedFocalRanges: FocalFollowRange[]
+	originalFileFocalRanges: Map<string, FocalFollowRange[]>
+	focalColorMap: Map<string, string>
 	validations?: Array<{
 		check: string
 		passed: boolean
@@ -476,6 +480,17 @@ export default function Home() {
 	const [reconstructionDebugInfo, setReconstructionDebugInfo] = useState<Array<{fileName: string; firstOriginal10: any[][]; firstReconstructed10: any[][]; lastOriginal10: any[][]; lastReconstructed10: any[][]; origTrimmedLength: number; reconTrimmedLength: number}> | null>(null)
 	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
 	const [pointSampleFilter, setPointSampleFilter] = useState<'all' | 'passed' | 'failed'>('all')
+	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
+
+	const toggleIntervalFixed = (intervalKey: string) => {
+		const newSet = new Set(fixedIntervals)
+		if (newSet.has(intervalKey)) {
+			newSet.delete(intervalKey)
+		} else {
+			newSet.add(intervalKey)
+		}
+		setFixedIntervals(newSet)
+	}
 
 	const handleDrop = (e: React.DragEvent) => {
 		e.preventDefault()
@@ -873,6 +888,20 @@ export default function Home() {
 					})
 				})
 
+				// Extract focal follow ranges
+				const mergedFocalRanges = extractFocalFollowRanges(mergedRows)
+
+				// Extract focal ranges from original files
+				const originalFileFocalRanges = new Map<string, FocalFollowRange[]>()
+				originalData.forEach((data) => {
+					const ranges = extractFocalFollowRanges(data.rows)
+					originalFileFocalRanges.set(data.fileName, ranges)
+				})
+
+				// Build color map for consistent coloring across merged and original
+				const allOriginalRanges = Array.from(originalFileFocalRanges.values()).flat()
+				const focalColorMap = buildFocalColorMap(mergedFocalRanges, allOriginalRanges)
+
 				// Add this date's result
 				results.push({
 					date: dateResult.date,
@@ -884,6 +913,9 @@ export default function Home() {
 					sourceFileBlocks: blocks,
 					droppedRows,
 					analysis: mergeAnalysis,
+					mergedFocalRanges,
+					originalFileFocalRanges,
+					focalColorMap,
 					validations: dateResult.validations || [],
 				})
 			}
@@ -900,7 +932,7 @@ export default function Home() {
 	return (
 		<div className="flex flex-col min-h-screen gap-6">
 			{/* Navigation Bar */}
-			<div className="border-b bg-slate-50/50 backdrop-blur-sm sticky top-0 z-50">
+			<div className="border-b  backdrop-blur-sm sticky top-0 z-50">
 				<div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
 					<div>
 						<h1 className="text-xl font-bold">Monkey Data Manager</h1>
@@ -1123,13 +1155,16 @@ export default function Home() {
 																				{filtered.map((interval: any, idx: number) => {
 																					const data1 = interval.data1 || String(result.mergedRows[interval.row1 - 1]?.[2] || '')
 																					const data2 = interval.data2 || String(result.mergedRows[interval.row2 - 1]?.[2] || '')
+																					const intervalKey = `${interval.row1}-${interval.row2}`
+																					const isFixed = fixedIntervals.has(intervalKey)
+																					
 																					return (
 																					<tr
 																						key={idx}
 																						className={cn(
 																							"border-b hover:bg-slate-100 transition-colors",
 																							idx % 2 === 0 && "bg-white",
-																							interval.status === 'pass' ? 'bg-green-50' : 'bg-red-100'
+																							interval.status === 'pass' ? 'bg-green-50' : isFixed ? 'bg-yellow-50' : 'bg-red-100'
 																						)}
 																					>
 																						<td className={cn("px-3 py-2 font-mono", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.row1}</td>
@@ -1140,11 +1175,23 @@ export default function Home() {
 																						<td className={cn("px-3 py-2 truncate", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-gray-700')}>{data2}</td>
 																						<td className={cn("px-3 py-2 font-mono font-semibold", interval.status === 'fail' && 'text-red-900', interval.status === 'pass' && 'text-muted-foreground')}>{interval.intervalMin}</td>
 																						<td className="px-3 py-2">
-																							{interval.status === 'pass' ? (
-																								<Badge className="bg-green-600 text-white">✓ Pass</Badge>
-																							) : (
-																								<Badge className="bg-red-600 text-white">✗ Fail</Badge>
-																							)}
+																							<div className="flex items-center gap-2">
+																								{interval.status === 'pass' ? (
+																									<Badge className="bg-green-600 text-white">✓ Pass</Badge>
+																								) : (
+																									<Badge className={isFixed ? "bg-yellow-600 text-white" : "bg-red-600 text-white"}>
+																										{isFixed ? "✓ Fixed" : "✗ Fail"}
+																									</Badge>
+																								)}
+																								{pointSampleFilter === 'failed' && interval.status === 'fail' && (
+																									<input
+																										type="checkbox"
+																										checked={isFixed}
+																										onChange={() => toggleIntervalFixed(intervalKey)}
+																										className="w-4 h-4 cursor-pointer"
+																									/>
+																								)}
+																							</div>
 																						</td>
 																					</tr>
 																					)
@@ -1184,6 +1231,36 @@ export default function Home() {
 														onSelectSourceFile={setSelectedSourceFile}
 													/>
 												</div>
+											</div>
+										)}
+
+										{/* Focal Follow Ranges Legends */}
+										{(result.mergedFocalRanges.length > 0 || Array.from(result.originalFileFocalRanges.values()).some((r) => r.length > 0)) && (
+											<div className="space-y-3">
+												<h3 className="text-sm font-semibold">Focal Follow Ranges</h3>
+												
+												{/* Merged File Legend - Full Width */}
+												<div>
+													<FocalFollowLegend
+														title="Merged File"
+														ranges={result.mergedFocalRanges}
+														colorMap={result.focalColorMap}
+													/>
+												</div>
+
+												{/* Original Files Legends - Grid */}
+												{Array.from(result.originalFileFocalRanges.entries()).length > 0 && (
+													<div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+														{Array.from(result.originalFileFocalRanges.entries()).map(([fileName, ranges]) => (
+															<FocalFollowLegend
+																key={fileName}
+																title={`Original: ${fileName}`}
+																ranges={ranges}
+																colorMap={result.focalColorMap}
+															/>
+														))}
+													</div>
+												)}
 											</div>
 										)}
 
