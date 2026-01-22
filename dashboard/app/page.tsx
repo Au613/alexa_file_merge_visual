@@ -1080,7 +1080,7 @@ export default function Home() {
 								<p className="text-sm text-muted-foreground mb-2">Drag and drop Excel files here, or</p>
 								<label>
 									<input type="file" multiple accept=".xls,.xlsx" className="hidden" onChange={handleFileInput} disabled={isProcessing} />
-									<Button variant="outline" size="sm" asChild disabled={isProcessing}>
+									<Button variant="outline" size="sm" asChild disabled={isProcessing} className="hover:text-inherit">
 										<span>Browse Files</span>
 									</Button>
 								</label>
@@ -1126,6 +1126,7 @@ export default function Home() {
 						setComparisonViewFile(null)
 					}}
 					disabled={isProcessing}
+					className="hover:text-inherit"
 				>
 					Clear
 				</Button>
@@ -1236,7 +1237,7 @@ export default function Home() {
 																				variant={pointSampleFilter === 'all' ? 'default' : 'outline'}
 																				size="sm"
 																				onClick={() => setPointSampleFilter('all')}
-																				className="text-xs h-7"
+																				className="text-xs h-7 hover:text-inherit"
 																			>
 																				All ({intervals.length})
 																			</Button>
@@ -1244,7 +1245,7 @@ export default function Home() {
 																				variant={pointSampleFilter === 'passed' ? 'default' : 'outline'}
 																				size="sm"
 																				onClick={() => setPointSampleFilter('passed')}
-																				className="text-xs h-7 bg-green-600 hover:bg-green-700 text-white"
+																				className="text-xs h-7 bg-green-600 hover:bg-green-700 text-white hover:opacity-75 hover:text-inherit"
 																			>
 																				Passed ({intervals.filter((i: any) => i.status === 'pass').length})
 																			</Button>
@@ -1252,7 +1253,7 @@ export default function Home() {
 																				variant={pointSampleFilter === 'failed' ? 'default' : 'outline'}
 																				size="sm"
 																				onClick={() => setPointSampleFilter('failed')}
-																				className="text-xs h-7 bg-red-600 hover:bg-red-700 text-white"
+																				className="text-xs h-7 bg-red-600 hover:bg-red-700 text-white hover:opacity-75 hover:text-inherit"
 																			>
 																				Failed ({intervals.filter((i: any) => i.status === 'fail').length})
 																			</Button>
@@ -1651,6 +1652,7 @@ export default function Home() {
 															variant="outline"
 															size="sm"
 															disabled={originalFileData.length === 0}
+															className="hover:opacity-75 hover:text-inherit"
 														>
 															<Download className="w-4 h-4 mr-2" />
 															Download
