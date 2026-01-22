@@ -944,7 +944,7 @@ export default function Home() {
 								Merge
 							</Link>
 						</Button>
-						<Button variant="outline" asChild>
+						<Button variant="outline" asChild className="hover:opacity-70 hover:text-inherit">
 							<Link href="/compare" className="flex items-center gap-2">
 								<GitCompare className="w-4 h-4" />
 								Compare
