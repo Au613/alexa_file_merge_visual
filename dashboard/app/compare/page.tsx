@@ -224,6 +224,9 @@ export default function Compare() {
   // editing state for individual rows
   const [editingRows, setEditingRows] = useState<Map<number, { version: "old" | "new", value: string }>>(new Map())
 
+  // edit history for undo functionality
+  const [editHistory, setEditHistory] = useState<Array<Map<number, { version: "old" | "new", value: string }>>>([])
+
   // inline editing (double-click) state
   const [editingInline, setEditingInline] = useState<{ compIdx: number; version: "old" | "new" } | null>(null)
   const editingDraftRef = useRef<string>("")
@@ -470,7 +473,7 @@ export default function Compare() {
     }
   }
 
-  const handleUndo = (idx: number) => {
+  const handleUndoIndex = (idx: number) => {
     setUndoneIndices((prev) => {
       const next = new Set(prev)
       if (next.has(idx)) next.delete(idx)
@@ -499,6 +502,10 @@ export default function Compare() {
     if (!editingInline) return
     const { compIdx, version } = editingInline
     const value = editingDraftRef.current
+    
+    // Save current state to history before making changes
+    setEditHistory((prev) => [...prev, new Map(editingRows)])
+    
     setEditingRows((prev) => {
       const next = new Map(prev)
       next.set(compIdx, { version, value })
@@ -508,6 +515,22 @@ export default function Compare() {
     handleSelectVersion(compIdx, version)
     setEditingInline(null)
     editingDraftRef.current = ""
+  }
+
+  const handleUndo = () => {
+    if (editHistory.length === 0) return
+    const previousState = editHistory[editHistory.length - 1]
+    setEditingRows(previousState)
+    setEditHistory((prev) => prev.slice(0, -1))
+  }
+
+  const handleResetRow = (compIdx: number) => {
+    setEditHistory((prev) => [...prev, new Map(editingRows)])
+    setEditingRows((prev) => {
+      const next = new Map(prev)
+      next.delete(compIdx)
+      return next
+    })
   }
 
   const handleCancelInlineEdit = () => {
@@ -1032,6 +1055,16 @@ export default function Compare() {
                 <div className="px-4 py-3 border-b-2 sticky top-0 z-40 flex items-center justify-between gap-2">
                   <h3 className="font-semibold text-sm">Edit Mode - Git Diff</h3>
                   <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleUndo}
+                      disabled={editHistory.length === 0}
+                      className="h-7 px-2"
+                      title="Undo last edit"
+                    >
+                      Undo ({editHistory.length})
+                    </Button>
                     <div className="flex items-center gap-1 text-xs">
                       <span className="text-muted-foreground">Theme:</span>
                       <Button
@@ -1127,22 +1160,27 @@ export default function Compare() {
                                 line.type === "add" && (tableTheme === "dark" ? "text-emerald-100" : "text-green-900"),
                               )}
                               onDoubleClick={() => {
-                                const canEdit =
-                                  comp.status === "modified" || comp.status === "added" || comp.status === "deleted"
-                                if (!canEdit) return
-
                                 const isOldLine = line.type === "del"
                                 const isNewLine = line.type === "add"
+                                const isContext = line.type === "context"
 
-                                if (comp.status === "modified" && !(isOldLine || isNewLine)) return
-                                if (comp.status === "added" && !isNewLine) return
-                                if (comp.status === "deleted" && !isOldLine) return
+                                // For context lines (unchanged), allow editing too
+                                let version: "old" | "new" = "new"
+                                let currentText = ""
 
-                                const currentText = isOldLine
-                                  ? comp.oldData.join(" | ")
-                                  : comp.newData.join(" | ")
+                                if (isContext) {
+                                  // Unchanged rows - use old data
+                                  version = "old"
+                                  currentText = comp.oldData.join(" | ")
+                                } else if (isOldLine) {
+                                  version = "old"
+                                  currentText = comp.oldData.join(" | ")
+                                } else if (isNewLine) {
+                                  version = "new"
+                                  currentText = comp.newData.join(" | ")
+                                }
 
-                                handleStartInlineEdit(line.compIdx, isOldLine ? "old" : "new", currentText)
+                                handleStartInlineEdit(line.compIdx, version, currentText)
                               }}
                             >
                               {(() => {
@@ -1224,7 +1262,18 @@ export default function Compare() {
 
                             {/* action */}
                             <td className="px-3 py-1 text-right">
-                              <div className="flex gap-1 justify-end items-center">
+                              <div className="flex flex-row gap-1 justify-end items-center">
+                                {editingRows.has(line.compIdx) && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleResetRow(line.compIdx)}
+                                    className="h-7 px-2 text-xs"
+                                    title="Reset to original"
+                                  >
+                                    Reset
+                                  </Button>
+                                )}
                                 {comp.status === "modified" ? (
                                   (() => {
                                     const selected = selectedVersions.get(line.compIdx) ?? "new"
@@ -1309,7 +1358,7 @@ export default function Compare() {
                                     <Button
                                       variant="outline"
                                       size="sm"
-                                      onClick={() => handleUndo(line.compIdx)}
+                                      onClick={() => handleUndoIndex(line.compIdx)}
                                       className="h-7 px-2"
                                     >
                                       {undoneIndices.has(line.compIdx) ? "Redo" : "Delete"}
@@ -1336,7 +1385,7 @@ export default function Compare() {
                                     <Button
                                       variant="outline"
                                       size="sm"
-                                      onClick={() => handleUndo(line.compIdx)}
+                                      onClick={() => handleUndoIndex(line.compIdx)}
                                       className="h-7 px-2"
                                     >
                                       {undoneIndices.has(line.compIdx) ? "Undo" : "Readd"}
@@ -1358,7 +1407,25 @@ export default function Compare() {
                                       </Button>
                                     )}
                                   </>
-                                ) : null}
+                                ) : (
+                                  // Context/Unchanged rows
+                                  line.type === "context" && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => {
+                                        const currentText = comp.oldData.join(" | ")
+                                        const currentEdit = editingRows.get(line.compIdx)
+                                        const editValue = currentEdit ? currentEdit.value : currentText
+                                        handleStartInlineEdit(line.compIdx, "old", editValue)
+                                      }}
+                                      className="h-7 px-2 bg-gray-800 hover:bg-gray-700 text-white"
+                                      title="Edit this row"
+                                    >
+                                      <Pencil className="w-3 h-3" />
+                                    </Button>
+                                  )
+                                )}
                               </div>
                             </td>
                           </tr>
