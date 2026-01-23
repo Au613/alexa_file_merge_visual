@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
-import { Upload, Download, X, AlertCircle, CheckCircle, FileSpreadsheet, GitCompare } from "lucide-react"
+import { Upload, Download, X, AlertCircle, CheckCircle, FileSpreadsheet, GitCompare, Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -116,7 +116,18 @@ function inlineDiff(oldText: string, newText: string) {
   return diffTokens(tokenizeForDiff(oldText), tokenizeForDiff(newText))
 }
 
-function InlineDiffText({ segs, mode }: { segs: InlineSeg[]; mode: "old" | "new" }) {
+function InlineDiffText({
+  segs,
+  mode,
+  theme,
+}: {
+  segs: InlineSeg[]
+  mode: "old" | "new"
+  theme: "light" | "dark"
+}) {
+  const delClass = theme === "dark" ? "bg-rose-900/60 text-rose-100" : "bg-red-200/70 text-red-900"
+  const addClass = theme === "dark" ? "bg-emerald-900/60 text-emerald-100" : "bg-green-200/70 text-green-900"
+
   return (
     <>
       {segs.map((seg, i) => {
@@ -124,7 +135,7 @@ function InlineDiffText({ segs, mode }: { segs: InlineSeg[]; mode: "old" | "new"
 
         if (mode === "old" && seg.t === "del") {
           return (
-            <span key={i} className="bg-red-200/70 text-red-900 rounded px-0.5">
+            <span key={i} className={cn("rounded px-0.5", delClass)}>
               {seg.s}
             </span>
           )
@@ -132,7 +143,7 @@ function InlineDiffText({ segs, mode }: { segs: InlineSeg[]; mode: "old" | "new"
 
         if (mode === "new" && seg.t === "add") {
           return (
-            <span key={i} className="bg-green-200/70 text-green-900 rounded px-0.5">
+            <span key={i} className={cn("rounded px-0.5", addClass)}>
               {seg.s}
             </span>
           )
@@ -209,6 +220,16 @@ export default function Compare() {
 
   // which version to keep for modified comps (old/new)
   const [selectedVersions, setSelectedVersions] = useState<Map<number, "old" | "new">>(new Map())
+
+  // editing state for individual rows
+  const [editingRows, setEditingRows] = useState<Map<number, { version: "old" | "new", value: string }>>(new Map())
+
+  // inline editing (double-click) state
+  const [editingInline, setEditingInline] = useState<{ compIdx: number; version: "old" | "new" } | null>(null)
+  const editingDraftRef = useRef<string>("")
+
+  // table theme
+  const [tableTheme, setTableTheme] = useState<"light" | "dark">("light")
 
   // preview final document modal
   const [showPreview, setShowPreview] = useState(false)
@@ -466,6 +487,34 @@ export default function Compare() {
     })
   }
 
+  const handleStartInlineEdit = (compIdx: number, version: "old" | "new", currentText: string) => {
+    setEditMode(true)
+    const existing = editingRows.get(compIdx)
+    const draft = existing && existing.version === version ? existing.value : currentText
+    editingDraftRef.current = draft
+    setEditingInline({ compIdx, version })
+  }
+
+  const handleSaveInlineEdit = () => {
+    if (!editingInline) return
+    const { compIdx, version } = editingInline
+    const value = editingDraftRef.current
+    setEditingRows((prev) => {
+      const next = new Map(prev)
+      next.set(compIdx, { version, value })
+      return next
+    })
+    // auto-select the edited version for modified rows
+    handleSelectVersion(compIdx, version)
+    setEditingInline(null)
+    editingDraftRef.current = ""
+  }
+
+  const handleCancelInlineEdit = () => {
+    setEditingInline(null)
+    editingDraftRef.current = ""
+  }
+
   const downloadResult = () => {
     try {
       const resultRows = computeFinalRows()
@@ -473,7 +522,12 @@ export default function Compare() {
       const worksheet = XLSX.utils.aoa_to_sheet(resultRows)
       const workbook = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(workbook, worksheet, "Merged")
-      XLSX.writeFile(workbook, "merged-comparison-result.xlsx")
+      
+      // Generate filename from new file name + '_edited'
+      const baseFileName = newFile?.name.replace(/\.xlsx?$/i, '') || 'merged-comparison-result'
+      const fileName = `${baseFileName}_edited.xlsx`
+      
+      XLSX.writeFile(workbook, fileName)
     } catch {
       setError("Failed to download result file")
     }
@@ -512,14 +566,16 @@ export default function Compare() {
     return showOnlyDifferences ? comparisons.filter((c) => c.status !== "unchanged") : comparisons
   }, [comparisons, showOnlyDifferences])
 
-  // Initialize selectedVersions default = "new" for modified
+  // Initialize selectedVersions default = "new" for modified (preserve user choices)
   useEffect(() => {
-    const m = new Map<number, "old" | "new">()
-    filteredComparisons.forEach((c, idx) => {
-      if (c.status === "modified") m.set(idx, "new")
+    setSelectedVersions((prev) => {
+      const next = new Map(prev)
+      comparisons.forEach((c, idx) => {
+        if (c.status === "modified" && !next.has(idx)) next.set(idx, "new")
+      })
+      return next
     })
-    setSelectedVersions(m)
-  }, [filteredComparisons])
+  }, [comparisons])
 
   // Compute final rows based on current selections
   const computeFinalRows = (): any[][] => {
@@ -527,32 +583,74 @@ export default function Compare() {
 
     comparisons.forEach((comp, idx) => {
       const undone = undoneIndices.has(idx)
+      const editedRow = editingRows.get(idx)
 
       if (comp.status === "deleted") {
         // readd if undone (user clicked readd)
-        if (undone) resultRows.push(comp.oldData)
+        if (undone) {
+          if (editedRow) {
+            // Use edited value if it exists
+            const parsed = editedRow.value.split(" | ")
+            resultRows.push(parsed)
+          } else {
+            resultRows.push(comp.oldData)
+          }
+        }
         return
       }
 
       if (comp.status === "added") {
         // delete if undone (user clicked delete)
-        if (!undone) resultRows.push(comp.newData)
+        if (!undone) {
+          if (editedRow) {
+            // Use edited value if it exists
+            const parsed = editedRow.value.split(" | ")
+            resultRows.push(parsed)
+          } else {
+            resultRows.push(comp.newData)
+          }
+        }
         return
       }
 
       if (comp.status === "modified") {
         // for modified, undone means keep old (user clicked undo)
         if (undone) {
-          resultRows.push(comp.oldData)
+          if (editedRow && editedRow.version === "old") {
+            // Use edited old value
+            const parsed = editedRow.value.split(" | ")
+            resultRows.push(parsed)
+          } else {
+            resultRows.push(comp.oldData)
+          }
           return
         }
         const pick = selectedVersions.get(idx) ?? "new"
-        resultRows.push(pick === "old" ? comp.oldData : comp.newData)
+        
+        if (editedRow && editedRow.version === pick) {
+          // Use edited value
+          const parsed = editedRow.value.split(" | ")
+          resultRows.push(parsed)
+        } else if (pick === "old") {
+          // When keeping old data, use new timestamp (column 2)
+          const resultRow = [...comp.oldData]
+          if (comp.newData[1]) {
+            resultRow[1] = comp.newData[1]
+          }
+          resultRows.push(resultRow)
+        } else {
+          resultRows.push(comp.newData)
+        }
         return
       }
 
       // unchanged
-      resultRows.push(comp.oldData)
+      if (editedRow) {
+        const parsed = editedRow.value.split(" | ")
+        resultRows.push(parsed)
+      } else {
+        resultRows.push(comp.oldData)
+      }
     })
 
     return resultRows
@@ -733,6 +831,19 @@ export default function Compare() {
     return map
   }, [filteredComparisons])
 
+  const rowBgClass = (type: DiffLineType, theme: "light" | "dark") => {
+    if (theme === "dark") {
+      if (type === "add") return "bg-emerald-950/40"
+      if (type === "del") return "bg-rose-950/35"
+      return "bg-slate-900"
+    }
+    if (type === "add") return "bg-green-50"
+    if (type === "del") return "bg-red-50"
+    return "bg-white"
+  }
+
+  const rowBorderClass = (theme: "light" | "dark") => (theme === "dark" ? "border-slate-800" : "border-gray-200")
+
   return (
     <div className="flex flex-col min-h-screen gap-6">
       {/* Navigation Bar */}
@@ -912,15 +1023,35 @@ export default function Compare() {
 
             {/* Side-by-side Comparison or Edit Mode */}
             {editMode ? (
-              <div className="border rounded-lg overflow-hidden flex flex-col h-auto max-h-96">
+              <div
+                className={cn(
+                  "border rounded-lg overflow-hidden flex flex-col h-auto max-h-96",
+                  tableTheme === "dark" ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900",
+                )}
+              >
                 <div className="px-4 py-3 border-b-2 sticky top-0 z-40 flex items-center justify-between gap-2">
                   <h3 className="font-semibold text-sm">Edit Mode - Git Diff</h3>
                   <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setShowPreview(true)}
-                    >
+                    <div className="flex items-center gap-1 text-xs">
+                      <span className="text-muted-foreground">Theme:</span>
+                      <Button
+                        variant={tableTheme === "light" ? "default" : "outline"}
+                        size="sm"
+                        className="h-7 px-2"
+                        onClick={() => setTableTheme("light")}
+                      >
+                        Light
+                      </Button>
+                      <Button
+                        variant={tableTheme === "dark" ? "default" : "outline"}
+                        size="sm"
+                        className="h-7 px-2"
+                        onClick={() => setTableTheme("dark")}
+                      >
+                        Dark
+                      </Button>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => setShowPreview(true)}>
                       Preview Final
                     </Button>
                     <Button
@@ -935,7 +1066,12 @@ export default function Compare() {
 
                 <div className="overflow-y-auto flex-1">
                   <table className="w-full text-xs font-mono">
-                    <thead className="bg-gray-900 text-white sticky top-0 z-30">
+                    <thead
+                      className={cn(
+                        "sticky top-0 z-30",
+                        tableTheme === "dark" ? "bg-slate-800 text-slate-100" : "bg-gray-900 text-white",
+                      )}
+                    >
                       <tr>
                         <th className="w-14 px-2 py-2 text-right opacity-80">old</th>
                         <th className="w-14 px-2 py-2 text-right opacity-80">new</th>
@@ -953,19 +1089,14 @@ export default function Compare() {
                         return (
                           <tr
                             key={line.key}
-                            className={cn(
-                              "border-b align-top",
-                              line.type === "add" && "bg-green-50",
-                              line.type === "del" && "bg-red-50",
-                              line.type === "context" && "bg-white",
-                            )}
+                            className={cn("border-b align-top", rowBgClass(line.type, tableTheme), rowBorderClass(tableTheme))}
                           >
                             {/* old line number */}
                             <td
                               className={cn(
                                 "px-2 py-1 text-right select-text",
-                                line.type === "del" && "text-red-900",
-                                "text-gray-500",
+                                tableTheme === "dark" ? "text-slate-400" : "text-gray-500",
+                                line.type === "del" && (tableTheme === "dark" ? "text-rose-200" : "text-red-900"),
                               )}
                             >
                               {line.type === "add" ? "" : line.oldRowIdx != null ? line.oldRowIdx + 1 : ""}
@@ -975,8 +1106,8 @@ export default function Compare() {
                             <td
                               className={cn(
                                 "px-2 py-1 text-right select-text",
-                                line.type === "add" && "text-green-900",
-                                "text-gray-500",
+                                tableTheme === "dark" ? "text-slate-400" : "text-gray-500",
+                                line.type === "add" && (tableTheme === "dark" ? "text-emerald-200" : "text-green-900"),
                               )}
                             >
                               {line.type === "del" ? "" : line.newRowIdx != null ? line.newRowIdx + 1 : ""}
@@ -991,67 +1122,244 @@ export default function Compare() {
                             <td
                               className={cn(
                                 "px-3 py-1 whitespace-pre-wrap break-words select-text",
-                                line.type === "del" && "text-red-900",
-                                line.type === "add" && "text-green-900",
-                                line.type === "context" && "text-gray-900",
+                                tableTheme === "dark" ? "text-slate-100" : "text-gray-900",
+                                line.type === "del" && (tableTheme === "dark" ? "text-rose-100" : "text-red-900"),
+                                line.type === "add" && (tableTheme === "dark" ? "text-emerald-100" : "text-green-900"),
                               )}
+                              onDoubleClick={() => {
+                                const canEdit =
+                                  comp.status === "modified" || comp.status === "added" || comp.status === "deleted"
+                                if (!canEdit) return
+
+                                const isOldLine = line.type === "del"
+                                const isNewLine = line.type === "add"
+
+                                if (comp.status === "modified" && !(isOldLine || isNewLine)) return
+                                if (comp.status === "added" && !isNewLine) return
+                                if (comp.status === "deleted" && !isOldLine) return
+
+                                const currentText = isOldLine
+                                  ? comp.oldData.join(" | ")
+                                  : comp.newData.join(" | ")
+
+                                handleStartInlineEdit(line.compIdx, isOldLine ? "old" : "new", currentText)
+                              }}
                             >
-                              <span className="opacity-70">{line.timestamp}</span>{" "}
                               {(() => {
-                                if (comp.status === "modified") {
-                                  const segs = inlineDiffCache.get(line.compIdx) ?? [{ t: "eq", s: line.text }]
-                                  return <InlineDiffText segs={segs} mode={line.type === "del" ? "old" : "new"} />
+                                const isEditing =
+                                  editingInline &&
+                                  editingInline.compIdx === line.compIdx &&
+                                  editingInline.version === (line.type === "del" ? "old" : "new")
+
+                                const editedRow = editingRows.get(line.compIdx)
+                                const thisVersion = line.type === "del" ? "old" : line.type === "add" ? "new" : null
+                                const displayText =
+                                  editedRow && thisVersion && editedRow.version === thisVersion
+                                    ? editedRow.value
+                                    : line.text
+
+                                if (isEditing) {
+                                  return (
+                                    <div className="flex flex-col gap-2">
+                                      <textarea
+                                        className={cn(
+                                          "w-full border rounded px-2 py-1 text-xs",
+                                          tableTheme === "dark"
+                                            ? "bg-slate-950 text-slate-100 border-slate-700"
+                                            : "bg-white text-black border-gray-300",
+                                        )}
+                                        rows={2}
+                                        defaultValue={editingDraftRef.current}
+                                        onChange={(e) => {
+                                          editingDraftRef.current = e.target.value
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter" && !e.shiftKey) {
+                                            e.preventDefault()
+                                            handleSaveInlineEdit()
+                                          }
+                                        }}
+                                      />
+                                      <div className="flex gap-2">
+                                        <Button size="sm" className="h-7 px-3" onClick={handleSaveInlineEdit}>
+                                          Save
+                                        </Button>
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          className="h-7 px-3"
+                                          onClick={handleCancelInlineEdit}
+                                        >
+                                          Cancel
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  )
                                 }
-                                return line.text
+
+                                return (
+                                  <>
+                                    <span className="opacity-70">{line.timestamp}</span>{" "}
+                                    {(() => {
+                                      if (comp.status === "modified") {
+                                        // if edited, show raw edited text; otherwise show diff
+                                        if (editedRow && thisVersion && editedRow.version === thisVersion) {
+                                          return displayText
+                                        }
+                                        const segs = inlineDiffCache.get(line.compIdx) ?? [{ t: "eq", s: line.text }]
+                                        return (
+                                          <InlineDiffText
+                                            segs={segs}
+                                            mode={line.type === "del" ? "old" : "new"}
+                                            theme={tableTheme}
+                                          />
+                                        )
+                                      }
+                                      return displayText
+                                    })()}
+                                  </>
+                                )
                               })()}
                             </td>
 
                             {/* action */}
                             <td className="px-3 py-1 text-right">
-                              {comp.status === "modified" ? (
-                                (() => {
-                                  const selected = selectedVersions.get(line.compIdx) ?? "new"
-                                  const isOldLine = line.type === "del"
-                                  const isNewLine = line.type === "add"
-                                  const isThisLineSelected =
-                                    (isOldLine && selected === "old") || (isNewLine && selected === "new")
+                              <div className="flex gap-1 justify-end items-center">
+                                {comp.status === "modified" ? (
+                                  (() => {
+                                    const selected = selectedVersions.get(line.compIdx) ?? "new"
+                                    const isOldLine = line.type === "del"
+                                    const isNewLine = line.type === "add"
+                                    const isThisLineSelected =
+                                      (isOldLine && selected === "old") || (isNewLine && selected === "new")
+                                    const editedRow = editingRows.get(line.compIdx)
+                                    const isEditing = editedRow && editedRow.version === (isOldLine ? "old" : "new")
 
-                                  if (!isOldLine && !isNewLine) return null
+                                    if (!isOldLine && !isNewLine) return null
 
-                                  if (isThisLineSelected) {
-                                    return <span className="text-xs font-semibold text-green-700">✓ Selected</span>
-                                  }
-
-                                  return (
+                                    return (
+                                      <>
+                                        {isThisLineSelected ? (
+                                          <>
+                                            <span className="inline-flex items-center gap-1 min-w-[96px] justify-center text-xs font-semibold text-green-700 px-2 py-1 rounded bg-green-50 border border-green-200">
+                                              ✓ Selected
+                                            </span>
+                                            {isEditing ? (
+                                              <span className="text-xs font-semibold text-blue-600 ml-1">(Edited)</span>
+                                            ) : null}
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              onClick={() => {
+                                                const currentText = isOldLine ? comp.oldData.join(" | ") : comp.newData.join(" | ")
+                                                const currentEdit = editingRows.get(line.compIdx)
+                                                
+                                                if (currentEdit && currentEdit.version === (isOldLine ? "old" : "new")) {
+                                                  // Currently editing, save it
+                                                  setEditingRows((prev) => {
+                                                    const next = new Map(prev)
+                                                    next.delete(line.compIdx)
+                                                    return next
+                                                  })
+                                                } else {
+                                                  // Start editing
+                                                  const editValue = currentEdit ? currentEdit.value : currentText
+                                                  handleStartInlineEdit(line.compIdx, isOldLine ? "old" : "new", editValue)
+                                                }
+                                              }}
+                                              className="h-7 px-2 bg-gray-800 hover:bg-gray-700 text-white"
+                                              title="Edit this row"
+                                            >
+                                              <Pencil className="w-3 h-3" />
+                                            </Button>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Button
+                                              variant="outline"
+                                              size="sm"
+                                              onClick={() => handleSelectVersion(line.compIdx, isOldLine ? "old" : "new")}
+                                              className="h-7 px-2"
+                                            >
+                                              Select
+                                            </Button>
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              onClick={() => {
+                                                const currentText = isOldLine ? comp.oldData.join(" | ") : comp.newData.join(" | ")
+                                                const currentEdit = editingRows.get(line.compIdx)
+                                                const editValue = (currentEdit && currentEdit.version === (isOldLine ? "old" : "new")) 
+                                                  ? currentEdit.value 
+                                                  : currentText
+                                                handleStartInlineEdit(line.compIdx, isOldLine ? "old" : "new", editValue)
+                                              }}
+                                              className="h-7 px-2 bg-gray-800 hover:bg-gray-700 text-white"
+                                              title="Edit and select this row"
+                                            >
+                                              <Pencil className="w-3 h-3" />
+                                            </Button>
+                                          </>
+                                        )}
+                                      </>
+                                    )
+                                  })()
+                                ) : comp.status === "added" ? (
+                                  <>
                                     <Button
                                       variant="outline"
                                       size="sm"
-                                      onClick={() => handleSelectVersion(line.compIdx, isOldLine ? "old" : "new")}
+                                      onClick={() => handleUndo(line.compIdx)}
                                       className="h-7 px-2"
                                     >
-                                      Select
+                                      {undoneIndices.has(line.compIdx) ? "Redo" : "Delete"}
                                     </Button>
-                                  )
-                                })()
-                              ) : comp.status === "added" ? (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => handleUndo(line.compIdx)}
-                                  className="h-7 px-2"
-                                >
-                                  {undoneIndices.has(line.compIdx) ? "Redo" : "Delete"}
-                                </Button>
-                              ) : comp.status === "deleted" ? (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => handleUndo(line.compIdx)}
-                                  className="h-7 px-2"
-                                >
-                                  {undoneIndices.has(line.compIdx) ? "Undo" : "Readd"}
-                                </Button>
-                              ) : null}
+                                    {!undoneIndices.has(line.compIdx) && (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => {
+                                          const currentText = comp.newData.join(" | ")
+                                          const currentEdit = editingRows.get(line.compIdx)
+                                          const editValue = currentEdit ? currentEdit.value : currentText
+                                          handleStartInlineEdit(line.compIdx, "new", editValue)
+                                        }}
+                                        className="h-7 px-2 bg-gray-800 hover:bg-gray-700 text-white"
+                                        title="Edit this row"
+                                      >
+                                        <Pencil className="w-3 h-3" />
+                                      </Button>
+                                    )}
+                                  </>
+                                ) : comp.status === "deleted" ? (
+                                  <>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleUndo(line.compIdx)}
+                                      className="h-7 px-2"
+                                    >
+                                      {undoneIndices.has(line.compIdx) ? "Undo" : "Readd"}
+                                    </Button>
+                                    {undoneIndices.has(line.compIdx) && (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => {
+                                          const currentText = comp.oldData.join(" | ")
+                                          const currentEdit = editingRows.get(line.compIdx)
+                                          const editValue = currentEdit ? currentEdit.value : currentText
+                                          handleStartInlineEdit(line.compIdx, "old", editValue)
+                                        }}
+                                        className="h-7 px-2 bg-gray-800 hover:bg-gray-700 text-white"
+                                        title="Edit this row"
+                                      >
+                                        <Pencil className="w-3 h-3" />
+                                      </Button>
+                                    )}
+                                  </>
+                                ) : null}
+                              </div>
                             </td>
                           </tr>
                         )
@@ -1063,7 +1371,12 @@ export default function Compare() {
             ) : (
               <div className="grid grid-cols-2 gap-6">
                 {/* Old File */}
-                <div className="border rounded-lg overflow-hidden flex flex-col h-96">
+                <div
+                  className={cn(
+                    "border rounded-lg overflow-hidden flex flex-col h-96",
+                    tableTheme === "dark" ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900",
+                  )}
+                >
                   <div className="px-4 py-3 border-b-2 sticky top-0 z-40">
                     <h3 className="font-semibold text-sm">Old File: {oldFile?.name}</h3>
                   </div>
@@ -1075,7 +1388,12 @@ export default function Compare() {
                     className="overflow-y-auto flex-1"
                   >
                     <table className="w-full text-xs">
-                      <thead className="bg-gray-900 text-white border-b sticky top-0 z-50 select-none">
+                      <thead
+                        className={cn(
+                          "border-b sticky top-0 z-50 select-none",
+                          tableTheme === "dark" ? "bg-slate-800 text-slate-100" : "bg-gray-900 text-white",
+                        )}
+                      >
                         <tr>
                           <th className="px-3 py-2 text-left font-semibold w-12">Row</th>
                           <th className="px-3 py-2 text-left font-semibold w-12">Type</th>
@@ -1091,9 +1409,15 @@ export default function Compare() {
                                 key={`old-${idx}`}
                                 className={cn(
                                   "border-b",
-                                  comp.status === "deleted" && "bg-red-100",
-                                  comp.status === "modified" && "bg-yellow-50",
-                                  comp.status === "unchanged" && "bg-blue-50",
+                                  tableTheme === "dark" ? "border-slate-800" : "border-gray-200",
+                                  comp.status === "deleted" &&
+                                    (tableTheme === "dark" ? "bg-rose-950/35" : "bg-red-100"),
+                                  comp.status === "added" &&
+                                    (tableTheme === "dark" ? "bg-emerald-950/35" : "bg-green-100"),
+                                  comp.status === "modified" &&
+                                    (tableTheme === "dark" ? "bg-amber-950/30" : "bg-yellow-50"),
+                                  comp.status === "unchanged" &&
+                                    (tableTheme === "dark" ? "bg-slate-900" : "bg-blue-50"),
                                 )}
                               >
                                 <td className="px-3 py-2 font-mono text-muted-foreground text-xs font-semibold select-text">
@@ -1110,8 +1434,20 @@ export default function Compare() {
                                     </Badge>
                                   )}
                                 </td>
-                                <td className="px-3 py-2 font-mono text-muted-foreground text-xs select-text">{comp.timestamp}</td>
-                                <td className="px-3 py-2 text-gray-700 text-xs whitespace-pre-wrap break-words select-text">
+                                <td
+                                  className={cn(
+                                    "px-3 py-2 font-mono text-xs select-text",
+                                    tableTheme === "dark" ? "text-slate-300" : "text-muted-foreground",
+                                  )}
+                                >
+                                  {comp.timestamp}
+                                </td>
+                                <td
+                                  className={cn(
+                                    "px-3 py-2 text-xs whitespace-pre-wrap break-words select-text",
+                                    tableTheme === "dark" ? "text-slate-100" : "text-gray-700",
+                                  )}
+                                >
                                   {comp.oldData.join(" | ")}
                                 </td>
                               </tr>
@@ -1123,7 +1459,12 @@ export default function Compare() {
                 </div>
 
                 {/* New File */}
-                <div className="border rounded-lg overflow-hidden flex flex-col h-96">
+                <div
+                  className={cn(
+                    "border rounded-lg overflow-hidden flex flex-col h-96",
+                    tableTheme === "dark" ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900",
+                  )}
+                >
                   <div className="px-4 py-3 border-b sticky top-0 z-40">
                     <h3 className="font-semibold text-sm">New File: {newFile?.name}</h3>
                   </div>
@@ -1135,7 +1476,12 @@ export default function Compare() {
                     className="overflow-y-auto flex-1"
                   >
                     <table className="w-full text-xs">
-                      <thead className="bg-gray-900 text-white border-b sticky top-0 z-50 select-none">
+                      <thead
+                        className={cn(
+                          "border-b sticky top-0 z-50 select-none",
+                          tableTheme === "dark" ? "bg-slate-800 text-slate-100" : "bg-gray-900 text-white",
+                        )}
+                      >
                         <tr>
                           <th className="px-3 py-2 text-left font-semibold w-12">Row</th>
                           <th className="px-3 py-2 text-left font-semibold w-12">Type</th>
@@ -1151,9 +1497,15 @@ export default function Compare() {
                                 key={`new-${idx}`}
                                 className={cn(
                                   "border-b",
-                                  comp.status === "added" && "bg-green-100",
-                                  comp.status === "modified" && "bg-yellow-50",
-                                  comp.status === "unchanged" && "bg-blue-50",
+                                  tableTheme === "dark" ? "border-slate-800" : "border-gray-200",
+                                  comp.status === "deleted" &&
+                                    (tableTheme === "dark" ? "bg-rose-950/35" : "bg-red-100"),
+                                  comp.status === "added" &&
+                                    (tableTheme === "dark" ? "bg-emerald-950/35" : "bg-green-100"),
+                                  comp.status === "modified" &&
+                                    (tableTheme === "dark" ? "bg-amber-950/30" : "bg-yellow-50"),
+                                  comp.status === "unchanged" &&
+                                    (tableTheme === "dark" ? "bg-slate-900" : "bg-blue-50"),
                                 )}
                               >
                                 <td className="px-3 py-2 font-mono text-muted-foreground text-xs font-semibold select-text">
@@ -1170,8 +1522,20 @@ export default function Compare() {
                                     </Badge>
                                   )}
                                 </td>
-                                <td className="px-3 py-2 font-mono text-muted-foreground text-xs select-text">{comp.timestamp}</td>
-                                <td className="px-3 py-2 text-gray-700 text-xs whitespace-pre-wrap break-words select-text">
+                                <td
+                                  className={cn(
+                                    "px-3 py-2 font-mono text-xs select-text",
+                                    tableTheme === "dark" ? "text-slate-300" : "text-muted-foreground",
+                                  )}
+                                >
+                                  {comp.timestamp}
+                                </td>
+                                <td
+                                  className={cn(
+                                    "px-3 py-2 text-xs whitespace-pre-wrap break-words select-text",
+                                    tableTheme === "dark" ? "text-slate-100" : "text-gray-700",
+                                  )}
+                                >
                                   {comp.newData.join(" | ")}
                                 </td>
                               </tr>
