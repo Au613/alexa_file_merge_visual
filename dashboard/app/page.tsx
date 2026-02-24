@@ -616,22 +616,63 @@ export default function Home() {
 		}
 	}
 
-	const downloadDroppedRows = (date: string) => {
+	const downloadDroppedRowsByFile = (date: string) => {
 		try {
 			const result = allResults.find((r) => r.date === date)
-			if (!result || !result.droppedRows || result.droppedRows.length === 0) {
+			if (!result || result.analysis.originalFiles.length === 0) {
 				return
 			}
 
-			// Create a new workbook with the dropped rows
-			const worksheet = XLSX.utils.aoa_to_sheet(result.droppedRows)
-			const workbook = XLSX.utils.book_new()
-			XLSX.utils.book_append_sheet(workbook, worksheet, "Dropped Rows")
+			const originalsForDate = originalFileData.filter((f) => normalizeSourceFile(f.fileName).startsWith(date))
+			const originalMap = new Map<string, {fileName: string; rows: any[][]}>()
+			for (const file of originalsForDate) {
+				originalMap.set(normalizeSourceFile(file.fileName), file)
+			}
 
-			// Download the file
-			XLSX.writeFile(workbook, `${date}-dropped-rows.xls`)
+			result.analysis.originalFiles.forEach((fileAnalysis) => {
+				if (fileAnalysis.droppedIndices.length === 0) return
+
+				const original = originalMap.get(normalizeSourceFile(fileAnalysis.fileName))
+				if (!original) return
+
+				const excludedRows = [
+					["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"],
+					...fileAnalysis.droppedIndices.flatMap((rowIdx) => {
+						const row = original.rows[rowIdx]
+						if (!row) return []
+							const rawDate = row[1]
+							const numericString = typeof rawDate === "string" && /^-?\d+(\.\d+)?$/.test(rawDate.trim())
+							let datetime = ""
+							if (rawDate instanceof Date) {
+								datetime = formatIsoDate(rawDate)
+							} else if (typeof rawDate === "number" && Number.isFinite(rawDate)) {
+								datetime = formatIsoDate(excelDateToJSDate(rawDate))
+							} else if (numericString) {
+								datetime = formatIsoDate(excelDateToJSDate(Number(rawDate)))
+							} else if (rawDate != null) {
+								datetime = String(rawDate)
+							}
+							return [[
+								String(row?.[0] ?? ""),
+								datetime,
+								String(row?.[2] ?? ""),
+								fileAnalysis.fileName,
+								rowIdx,
+							]]
+						}),
+				]
+
+				if (excludedRows.length <= 1) return
+
+				const worksheet = XLSX.utils.aoa_to_sheet(excludedRows)
+				const workbook = XLSX.utils.book_new()
+				XLSX.utils.book_append_sheet(workbook, worksheet, "Excluded Rows")
+
+				const excludedName = original.fileName.replace(/\.xE(\.xls[x]?)$/i, "_excluded.xE$1")
+				XLSX.writeFile(workbook, excludedName)
+			})
 		} catch (err) {
-			console.error("Download dropped rows failed:", err)
+			console.error("Download excluded rows failed:", err)
 		}
 	}
 
@@ -1628,16 +1669,17 @@ export default function Home() {
 														Excluded Rows <span className="text-xs text-muted-foreground font-normal">({result.droppedRows.length - 1} rows)</span>
 													</h4>
 													<p className="text-xs text-muted-foreground mb-3">
-														Download the {result.droppedRows.length - 1} rows that were excluded from the merge
+														Download excluded rows per original file with the "_excluded" suffix
 													</p>
 													<Button
-														onClick={() => downloadDroppedRows(result.date)}
+														onClick={() => downloadDroppedRowsByFile(result.date)}
 														variant="outline"
 														size="sm"
+														disabled={originalFileData.length === 0}
 														className="w-full cursor-grab hover:text-inherit"
 													>
 														<Download className="w-4 h-4 mr-2" />
-														Download Excluded Rows
+														Download Excluded Rows (Per File)
 													</Button>
 												</div>
 											)}
