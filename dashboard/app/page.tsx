@@ -1044,6 +1044,12 @@ export default function Home() {
 							</Link>
 						</Button>
 						<Button variant="outline" asChild className="hover:opacity-70 hover:text-inherit">
+							<Link href="/point-sample" className="flex items-center gap-2">
+								<CheckCircle className="w-4 h-4" />
+								Point Sample
+							</Link>
+						</Button>
+						<Button variant="outline" asChild className="hover:opacity-70 hover:text-inherit">
 							<Link href="/compare" className="flex items-center gap-2">
 								<GitCompare className="w-4 h-4" />
 								Compare
