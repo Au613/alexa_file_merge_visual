@@ -20,19 +20,86 @@ interface UploadedFile {
 }
 
 function excelDateToJSDate(serial: number): Date {
-	const utcDays = Math.floor(serial - 25569)
-	const utcValue = utcDays * 86400
-	const fractionalDay = serial - Math.floor(serial) + 0.0000001
-	const totalSeconds = Math.floor(86400 * fractionalDay)
-	return new Date((utcValue + totalSeconds) * 1000)
+	// Excel dates are stored as days since 1900-01-01 in local time
+	// We need to create a local date, not UTC
+	const days = Math.floor(serial)
+	const fractionalDay = serial - days
+	
+	// Excel epoch: January 1, 1900 (but Excel has a leap year bug, treating 1900 as a leap year)
+	const excelEpoch = new Date(1900, 0, 1)
+	// Add days (accounting for Excel's 1900 leap year bug)
+	const daysToAdd = days - 2 // -1 for Excel's 1-based indexing, -1 for the 1900 leap year bug
+	excelEpoch.setDate(excelEpoch.getDate() + daysToAdd)
+	
+	// Add the time portion
+	const totalSeconds = Math.round(fractionalDay * 86400)
+	excelEpoch.setHours(0, 0, 0, 0)
+	excelEpoch.setSeconds(totalSeconds)
+	
+	return excelEpoch
+}
+
+function formatExcelSerialDate(serial: number): string {
+	const date = excelDateToJSDate(serial)
+	const mm = String(date.getMonth() + 1).padStart(2, "0")
+	const dd = String(date.getDate()).padStart(2, "0")
+	const yyyy = date.getFullYear()
+	const hh = String(date.getHours()).padStart(2, "0")
+	const min = String(date.getMinutes()).padStart(2, "0")
+	const sec = String(date.getSeconds()).padStart(2, "0")
+	return `${mm}/${dd}/${yyyy} ${hh}:${min}:${sec}`
 }
 
 function normalizeDateCell(v: any): string {
 	if (v == null || v === "") return ""
+	// If it's already a string, keep it exactly as-is
+	if (typeof v === "string") return v.trim()
+	// If it's a Date object from cellDates: true, format it in local time
+	if (v instanceof Date) {
+		const mm = String(v.getMonth() + 1).padStart(2, "0")
+		const dd = String(v.getDate()).padStart(2, "0")
+		const yyyy = v.getFullYear()
+		const hh = String(v.getHours()).padStart(2, "0")
+		const min = String(v.getMinutes()).padStart(2, "0")
+		const sec = String(v.getSeconds()).padStart(2, "0")
+		return `${mm}/${dd}/${yyyy} ${hh}:${min}:${sec}`
+	}
+	// Only convert Excel serial numbers as fallback
 	if (typeof v === "number" && Number.isFinite(v)) {
-		return excelDateToJSDate(v).toISOString()
+		return formatExcelSerialDate(v)
 	}
 	return String(v).trim()
+}
+
+function formatDisplayTime(timeStr: string): string {
+	if (!timeStr) return ""
+	// If it already looks like a formatted date string (M/D/YYYY), normalize the format only
+	if (/^\d{1,2}\/\d{1,2}\/\d{4}/.test(timeStr)) {
+		try {
+			const parts = timeStr.split(/[\s\/:]/)
+			if (parts.length >= 6) {
+				const mm = parts[0].padStart(2, "0")
+				const dd = parts[1].padStart(2, "0")
+				const yyyy = parts[2]
+				let hh = parts[3].padStart(2, "0")
+				const min = parts[4].padStart(2, "0")
+				const sec = parts[5].padStart(2, "0")
+				
+				// Handle AM/PM if present
+				if (timeStr.toUpperCase().includes("PM") && parseInt(hh) < 12) {
+					hh = String(parseInt(hh) + 12).padStart(2, "0")
+				} else if (timeStr.toUpperCase().includes("AM") && parseInt(hh) === 12) {
+					hh = "00"
+				}
+				
+				return `${mm}/${dd}/${yyyy} ${hh}:${min}:${sec}`
+			}
+		} catch {
+			// If parsing fails, return as-is
+		}
+	}
+	// For anything else, return as-is (already formatted by normalizeDateCell)
+	return timeStr
 }
 
 function normalizeRowsForValidation(rows: any[][]): any[][] {
@@ -118,10 +185,11 @@ export default function PointSamplePage() {
 	}
 
 	const parseExcelFile = (buffer: ArrayBuffer): any[][] => {
-		const workbook = XLSX.read(buffer, {type: "array"})
+		const workbook = XLSX.read(buffer, {type: "array", cellDates: true})
 		const sheetName = workbook.SheetNames[0]
 		const worksheet = workbook.Sheets[sheetName]
-		return XLSX.utils.sheet_to_json(worksheet, {header: 1}) as any[][]
+		// Use raw: true to get actual Date objects and numbers, not formatted strings
+		return XLSX.utils.sheet_to_json(worksheet, {header: 1, raw: true, defval: ""}) as any[][]
 	}
 
 	const runPointSampleCheck = async () => {
@@ -349,7 +417,9 @@ export default function PointSamplePage() {
 											const data1 = interval.data1 || String(rows[interval.row1 - 1]?.[2] || "")
 											const data2 = interval.data2 || String(rows[interval.row2 - 1]?.[2] || "")
 											const intervalKey = `${interval.row1}-${interval.row2}`
-											const isFixed = fixedIntervals.has(intervalKey)
+										const isFixed = fixedIntervals.has(intervalKey)
+										const time1Display = formatDisplayTime(interval.time1)
+										const time2Display = formatDisplayTime(interval.time2)
 
 											return (
 												<tr
@@ -361,10 +431,10 @@ export default function PointSamplePage() {
 													)}
 												>
 													<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row1}</td>
-													<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.time1}</td>
-													<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data1}</td>
-													<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row2}</td>
-													<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.time2}</td>
+												<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{time1Display}</td>
+												<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data1}</td>
+												<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row2}</td>
+												<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{time2Display}</td>
 													<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data2}</td>
 													<td className={cn("px-3 py-2 font-mono font-semibold", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.intervalMin}</td>
 													<td className="px-3 py-2">

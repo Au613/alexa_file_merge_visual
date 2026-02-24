@@ -104,8 +104,10 @@ export function checkPointSampleIntervals(mergedRows: any[][]): ValidationResult
     // Check if line starts with exactly "Y" (not "Y X" or other combinations)
     else if (data.startsWith("Y") || data === "Y") {
       try {
+        // Parse the datetime string - it could be MM/DD/YYYY HH:mm:ss format
         const dateObj = new Date(datetime)
         if (!isNaN(dateObj.getTime())) {
+          // Store the original string as-is without any conversion
           currentSection.push({ rowIdx: i, data, datetime: dateObj, originalTime: datetime })
         }
       } catch {
