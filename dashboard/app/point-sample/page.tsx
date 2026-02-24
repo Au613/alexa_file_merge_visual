@@ -66,6 +66,17 @@ export default function PointSamplePage() {
 	const [warnings, setWarnings] = useState<string[]>([])
 	const [passed, setPassed] = useState<boolean | null>(null)
 	const [rows, setRows] = useState<any[][]>([])
+	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
+
+	const toggleIntervalFixed = (intervalKey: string) => {
+		const newSet = new Set(fixedIntervals)
+		if (newSet.has(intervalKey)) {
+			newSet.delete(intervalKey)
+		} else {
+			newSet.add(intervalKey)
+		}
+		setFixedIntervals(newSet)
+	}
 
 	const handleDrop = (e: React.DragEvent) => {
 		e.preventDefault()
@@ -229,8 +240,9 @@ export default function PointSamplePage() {
 													setIssues([])
 													setWarnings([])
 													setPassed(null)
-													setRows([])
-												}}
+												setRows([])
+												setFixedIntervals(new Set())
+											}}
 											>
 												Remove
 											</Button>
@@ -256,6 +268,7 @@ export default function PointSamplePage() {
 							setPassed(null)
 							setRows([])
 							setError(null)
+							setFixedIntervals(new Set())
 						}}
 						disabled={isProcessing}
 						className="hover:text-inherit"
@@ -354,6 +367,8 @@ export default function PointSamplePage() {
 										{filteredIntervals.map((interval, idx) => {
 											const data1 = interval.data1 || String(rows[interval.row1 - 1]?.[2] || "")
 											const data2 = interval.data2 || String(rows[interval.row2 - 1]?.[2] || "")
+											const intervalKey = `${interval.row1}-${interval.row2}`
+											const isFixed = fixedIntervals.has(intervalKey)
 
 											return (
 												<tr
@@ -361,7 +376,7 @@ export default function PointSamplePage() {
 													className={cn(
 														"border-b hover:bg-slate-100 transition-colors",
 														idx % 2 === 0 && "bg-white",
-														interval.status === "pass" ? "bg-green-50" : "bg-red-100"
+														interval.status === "pass" ? "bg-green-50" : isFixed ? "bg-yellow-50" : "bg-red-100"
 													)}
 												>
 													<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row1}</td>
@@ -372,11 +387,23 @@ export default function PointSamplePage() {
 													<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data2}</td>
 													<td className={cn("px-3 py-2 font-mono font-semibold", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.intervalMin}</td>
 													<td className="px-3 py-2">
-														{interval.status === "pass" ? (
-															<Badge className="bg-green-600 text-white">✓ Pass</Badge>
-														) : (
-															<Badge className="bg-red-600 text-white">✗ Fail</Badge>
-														)}
+														<div className="flex items-center gap-2">
+															{interval.status === "pass" ? (
+																<Badge className="bg-green-600 text-white">✓ Pass</Badge>
+															) : (
+																<Badge className={isFixed ? "bg-yellow-600 text-white" : "bg-red-600 text-white"}>
+																	{isFixed ? "✓ Fixed" : "✗ Fail"}
+																</Badge>
+															)}
+															{pointSampleFilter === "failed" && interval.status === "fail" && (
+																<input
+																	type="checkbox"
+																	checked={isFixed}
+																	onChange={() => toggleIntervalFixed(intervalKey)}
+																	className="w-4 h-4 cursor-pointer"
+																/>
+															)}
+														</div>
 													</td>
 												</tr>
 											)
