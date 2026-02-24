@@ -2,7 +2,7 @@
 
 import {useState} from "react"
 import Link from "next/link"
-import {Upload, FileSpreadsheet, ChevronDown, CheckCircle, AlertCircle} from "lucide-react"
+import {Upload, FileSpreadsheet, ChevronDown, CheckCircle, AlertCircle, GitCompare} from "lucide-react"
 import * as XLSX from "xlsx"
 import {Button} from "@/components/ui/button"
 import {Card, CardContent} from "@/components/ui/card"
@@ -10,6 +10,7 @@ import {Badge} from "@/components/ui/badge"
 import {Collapsible, CollapsibleTrigger, CollapsibleContent} from "@/components/ui/collapsible"
 import {cn} from "@/lib/utils"
 import {checkPointSampleIntervals} from "@/lib/validators"
+import {Navigation} from "@/components/Navigation"
 
 interface UploadedFile {
 	id: string
@@ -157,27 +158,7 @@ export default function PointSamplePage() {
 
 	return (
 		<div className="flex flex-col min-h-screen gap-6">
-			<div className="border-b backdrop-blur-sm sticky top-0 z-50">
-				<div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-					<div>
-						<h1 className="text-xl font-bold">Monkey Data Manager</h1>
-					</div>
-					<div className="flex gap-2">
-						<Button variant="outline" asChild className="hover:opacity-70 hover:text-inherit">
-							<Link href="/" className="flex items-center gap-2">
-								<FileSpreadsheet className="w-4 h-4" />
-								Merge
-							</Link>
-						</Button>
-						<Button variant="default" asChild>
-							<Link href="/point-sample" className="flex items-center gap-2">
-								<CheckCircle className="w-4 h-4" />
-								Point Sample
-							</Link>
-						</Button>
-					</div>
-				</div>
-			</div>
+			<Navigation />
 
 			<div className="flex flex-col gap-6 p-6 max-w-5xl mx-auto w-full">
 				<div className="text-center mb-4">

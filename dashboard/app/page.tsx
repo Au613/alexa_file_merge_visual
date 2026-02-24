@@ -10,6 +10,7 @@ import {Collapsible, CollapsibleTrigger, CollapsibleContent} from "@/components/
 import {cn, extractFocalFollowRanges, buildFocalColorMap, FocalFollowRange} from "@/lib/utils"
 import {ValidationPanel} from "@/components/ValidationPanel"
 import {FocalFollowLegend} from "@/components/FocalFollowLegend"
+import {Navigation} from "@/components/Navigation"
 import * as XLSX from "xlsx"
 
 interface UploadedFile {
