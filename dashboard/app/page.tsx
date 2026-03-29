@@ -7,6 +7,7 @@ import {Button} from "@/components/ui/button"
 import {Card, CardContent} from "@/components/ui/card"
 import {Badge} from "@/components/ui/badge"
 import {Collapsible, CollapsibleTrigger, CollapsibleContent} from "@/components/ui/collapsible"
+import {Switch} from "@/components/ui/switch"
 import {cn, extractFocalFollowRanges, buildFocalColorMap, FocalFollowRange} from "@/lib/utils"
 import {ValidationPanel} from "@/components/ValidationPanel"
 import {FocalFollowLegend} from "@/components/FocalFollowLegend"
@@ -533,6 +534,7 @@ export default function Home() {
 	const [comparisonViewFile, setComparisonViewFile] = useState<string | null>(null)
 	const [pointSampleFilter, setPointSampleFilter] = useState<'all' | 'passed' | 'failed'>('all')
 	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
+	const [includeMetadataDownloads, setIncludeMetadataDownloads] = useState(true)
 
 	const toggleIntervalFixed = (intervalKey: string) => {
 		const newSet = new Set(fixedIntervals)
@@ -586,38 +588,43 @@ export default function Home() {
 		setFiles((prev) => prev.filter((f) => f.id !== id))
 	}
 
-	const downloadFile = async (date: string, version: "standard" | "withMetadata") => {
+	const downloadBlob = (buffer: ArrayBuffer, fileName: string) => {
+		const blob = new Blob([buffer], {type: "application/vnd.ms-excel"})
+		const url = window.URL.createObjectURL(blob)
+		const a = document.createElement("a")
+		a.href = url
+		a.download = fileName
+		document.body.appendChild(a)
+		a.click()
+		window.URL.revokeObjectURL(url)
+		document.body.removeChild(a)
+	}
+
+	const decodeBase64ToBytes = (base64Data: string): ArrayBuffer => {
+		const binaryString = atob(base64Data)
+		const bytes = new Uint8Array(binaryString.length)
+		for (let i = 0; i < binaryString.length; i++) {
+			bytes[i] = binaryString.charCodeAt(i)
+		}
+		return bytes.buffer
+	}
+
+	const downloadFile = async (date: string, withMetadata: boolean) => {
 		try {
 			const result = allResults.find((r) => r.date === date)
 			if (!result) {
 				return
 			}
 
-			const base64Data = version === "standard" ? result.metadata.standard : result.metadata.metadata
-
-			// Decode base64 to binary
-			const binaryString = atob(base64Data)
-			const bytes = new Uint8Array(binaryString.length)
-			for (let i = 0; i < binaryString.length; i++) {
-				bytes[i] = binaryString.charCodeAt(i)
-			}
-
-			// Create blob and download
-			const blob = new Blob([bytes], {type: "application/vnd.ms-excel"})
-			const url = window.URL.createObjectURL(blob)
-			const a = document.createElement("a")
-			a.href = url
-			a.download = version === "standard" ? `${date}-merged.xls` : `${date}-merged-with-metadata.xls`
-			document.body.appendChild(a)
-			a.click()
-			window.URL.revokeObjectURL(url)
-			document.body.removeChild(a)
+			const base64Data = withMetadata ? result.metadata.metadata : result.metadata.standard
+			const bytes = decodeBase64ToBytes(base64Data)
+			downloadBlob(bytes, withMetadata ? `${date}-merged with metadata.xls` : `${date}-merged.xls`)
 		} catch (err) {
 			console.error("Download failed:", err)
 		}
 	}
 
-	const downloadDroppedRowsByFile = (date: string) => {
+	const downloadDroppedRowsByFile = (date: string, withMetadata: boolean) => {
 		try {
 			const result = allResults.find((r) => r.date === date)
 			if (!result || result.analysis.originalFiles.length === 0) {
@@ -637,7 +644,9 @@ export default function Home() {
 				if (!original) return
 
 				const excludedRows = [
-					["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"],
+					withMetadata
+						? ["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"]
+						: ["Row Data (Author)", "DateTime", "Data"],
 					...fileAnalysis.droppedIndices.flatMap((rowIdx) => {
 						const row = original.rows[rowIdx]
 						if (!row) return []
@@ -653,13 +662,17 @@ export default function Home() {
 							} else if (rawDate != null) {
 								datetime = String(rawDate)
 							}
-							return [[
-								String(row?.[0] ?? ""),
-								datetime,
-								String(row?.[2] ?? ""),
-								fileAnalysis.fileName,
-								rowIdx,
-							]]
+							if (withMetadata) {
+								return [[
+									String(row?.[0] ?? ""),
+									datetime,
+									String(row?.[2] ?? ""),
+									fileAnalysis.fileName,
+									rowIdx,
+								]]
+							}
+
+							return [[String(row?.[0] ?? ""), datetime, String(row?.[2] ?? "")]]
 						}),
 				]
 
@@ -669,7 +682,8 @@ export default function Home() {
 				const workbook = XLSX.utils.book_new()
 				XLSX.utils.book_append_sheet(workbook, worksheet, "Excluded Rows")
 
-				const excludedName = original.fileName.replace(/\.xE(\.xls[x]?)$/i, "_excluded.xE$1")
+				const excludedSuffix = withMetadata ? "_excluded_with_metadata" : "_excluded"
+				const excludedName = original.fileName.replace(/\.xE(\.xls[x]?)$/i, `${excludedSuffix}.xE$1`)
 				XLSX.writeFile(workbook, excludedName)
 			})
 		} catch (err) {
@@ -793,35 +807,43 @@ export default function Home() {
 		}
 	}
 
-	const downloadAllFiles = async () => {
+	const downloadAllMergedFiles = async () => {
 		try {
 			if (allResults.length === 0) {
 				return
 			}
 
 			for (const result of allResults) {
-				const binaryStringStandard = atob(result.metadata.standard)
-				const bytesStandard = new Uint8Array(binaryStringStandard.length)
-				for (let i = 0; i < binaryStringStandard.length; i++) {
-					bytesStandard[i] = binaryStringStandard.charCodeAt(i)
-				}
-
-				const blobStandard = new Blob([bytesStandard], {type: "application/vnd.ms-excel"})
-				const urlStandard = window.URL.createObjectURL(blobStandard)
-				const aStandard = document.createElement("a")
-				aStandard.href = urlStandard
-				aStandard.download = `${result.date}-merged.xls`
-				document.body.appendChild(aStandard)
-				aStandard.click()
-				window.URL.revokeObjectURL(urlStandard)
-				document.body.removeChild(aStandard)
+				const base64Data = includeMetadataDownloads ? result.metadata.metadata : result.metadata.standard
+				const bytes = decodeBase64ToBytes(base64Data)
+				downloadBlob(bytes, includeMetadataDownloads ? `${result.date}-merged with metadata.xls` : `${result.date}-merged.xls`)
 
 				// Small delay between downloads
 				await new Promise((resolve) => setTimeout(resolve, 100))
 			}
 		} catch (err) {
-			console.error("Download all files failed:", err)
+			console.error("Download merged files failed:", err)
 		}
+	}
+
+	const downloadAllExcludedRows = async () => {
+		try {
+			if (allResults.length === 0 || originalFileData.length === 0) {
+				return
+			}
+
+			for (const result of allResults) {
+				downloadDroppedRowsByFile(result.date, includeMetadataDownloads)
+				await new Promise((resolve) => setTimeout(resolve, 100))
+			}
+		} catch (err) {
+			console.error("Download excluded rows failed:", err)
+		}
+	}
+
+	const downloadAllMergedAndExcluded = async () => {
+		await downloadAllMergedFiles()
+		await downloadAllExcludedRows()
 	}
 
 	const parseExcelFile = (buffer: Buffer): any[][] => {
@@ -1185,12 +1207,25 @@ export default function Home() {
 				<div className="space-y-3">
 					<div className="flex items-center justify-between">
 						<h2 className="text-lg font-semibold">Merge Results</h2>
-						{allResults.length > 1 && (
-							<Button onClick={downloadAllFiles} variant="outline" size="sm" className="cursor-grab hover:text-inherit">
+						<div className="flex items-center gap-2">
+							<Button onClick={downloadAllMergedFiles} variant="outline" size="sm" className="cursor-grab hover:text-inherit" disabled={allResults.length === 0}>
+								<Download className="w-4 h-4 mr-2" />
+								Download Merged
+							</Button>
+							<Button onClick={downloadAllExcludedRows} variant="outline" size="sm" className="cursor-grab hover:text-inherit" disabled={allResults.length === 0 || originalFileData.length === 0}>
+								<Download className="w-4 h-4 mr-2" />
+								Download Excluded Rows
+							</Button>
+							<Button onClick={downloadAllMergedAndExcluded} variant="outline" size="sm" className="cursor-grab hover:text-inherit" disabled={allResults.length === 0 || originalFileData.length === 0}>
 								<Download className="w-4 h-4 mr-2" />
 								Download All
 							</Button>
-						)}
+							<div className="flex items-center gap-2 border rounded-md px-2 py-1">
+								<span className="text-xs text-muted-foreground">W/o metadata</span>
+								<Switch checked={includeMetadataDownloads} onCheckedChange={setIncludeMetadataDownloads} aria-label="Toggle metadata for downloads" />
+								<span className="text-xs font-medium">W/ metadata</span>
+							</div>
+						</div>
 					</div>
 					{allResults.map((result) => (
 						<Collapsible key={result.date} defaultOpen={allResults.length === 1}>
@@ -1639,7 +1674,7 @@ export default function Home() {
 													<div>
 														<p className="text-xs font-medium mb-2">Standard Version</p>
 														<Button
-															onClick={() => downloadFile(result.date, "standard")}
+															onClick={() => downloadFile(result.date, false)}
 															variant="outline"
 															size="sm"
 															className="w-full cursor-grab hover:text-inherit"
@@ -1651,7 +1686,7 @@ export default function Home() {
 													<div>
 														<p className="text-xs font-medium mb-2">With Metadata</p>
 														<Button
-															onClick={() => downloadFile(result.date, "withMetadata")}
+															onClick={() => downloadFile(result.date, true)}
 															variant="outline"
 															size="sm"
 															className="w-full cursor-grab hover:text-inherit"
@@ -1673,7 +1708,7 @@ export default function Home() {
 														Download excluded rows per original file with the "_excluded" suffix
 													</p>
 													<Button
-														onClick={() => downloadDroppedRowsByFile(result.date)}
+															onClick={() => downloadDroppedRowsByFile(result.date, includeMetadataDownloads)}
 														variant="outline"
 														size="sm"
 														disabled={originalFileData.length === 0}
