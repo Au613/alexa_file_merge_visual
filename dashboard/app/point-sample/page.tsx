@@ -135,6 +135,15 @@ export default function PointSamplePage() {
 	const [passed, setPassed] = useState<boolean | null>(null)
 	const [rows, setRows] = useState<any[][]>([])
 	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
+	const [excessRowGroups, setExcessRowGroups] = useState<Array<{
+		xRowIdx: number
+		endRowIdx: number
+		xTimestamp: string
+		endTimestamp: string
+		betweenRows: {rowIdx: number; timestamp: string; data: string}[]
+		timestampMatch: boolean
+	}>>([])
+
 
 	const toggleIntervalFixed = (intervalKey: string) => {
 		const newSet = new Set(fixedIntervals)
@@ -209,6 +218,48 @@ export default function PointSamplePage() {
 			setIssues(validation.issues)
 			setWarnings(validation.warnings)
 			setPassed(validation.passed)
+
+			// Excess row check: find X-to-End sections with rows in between
+			const errGroups: Array<{
+				xRowIdx: number
+				endRowIdx: number
+				xTimestamp: string
+				endTimestamp: string
+				betweenRows: {rowIdx: number; timestamp: string; data: string}[]
+				timestampMatch: boolean
+			}> = []
+			for (let i = 0; i < normalizedRows.length; i++) {
+				const cellData = String(normalizedRows[i][2] || "").trim()
+				if (cellData.toLowerCase().startsWith("end")) {
+					let xIdx = -1
+					for (let j = i - 1; j >= 0; j--) {
+						if (String(normalizedRows[j][2] || "").trim().startsWith("X")) {
+							xIdx = j
+							break
+						}
+					}
+					if (xIdx >= 0 && i - xIdx > 1) {
+						const xTs = String(normalizedRows[xIdx][1] || "")
+						const between: {rowIdx: number; timestamp: string; data: string}[] = []
+						let allMatch = true
+						for (let k = xIdx + 1; k < i; k++) {
+							const ts = String(normalizedRows[k][1] || "")
+							const d = String(normalizedRows[k][2] || "")
+							between.push({rowIdx: k, timestamp: ts, data: d})
+							if (ts !== xTs) allMatch = false
+						}
+						errGroups.push({
+							xRowIdx: xIdx,
+							endRowIdx: i,
+							xTimestamp: xTs,
+							endTimestamp: String(normalizedRows[i][1] || ""),
+							betweenRows: between,
+							timestampMatch: allMatch,
+						})
+					}
+				}
+			}
+			setExcessRowGroups(errGroups)
 		} catch (err) {
 			console.error(err)
 			setError("Failed to analyze the file.")
@@ -291,6 +342,7 @@ export default function PointSamplePage() {
 													setPassed(null)
 												setRows([])
 												setFixedIntervals(new Set())
+												setExcessRowGroups([])
 											}}
 											>
 												Remove
@@ -318,6 +370,7 @@ export default function PointSamplePage() {
 							setRows([])
 							setError(null)
 							setFixedIntervals(new Set())
+							setExcessRowGroups([])
 						}}
 						disabled={isProcessing}
 						className="hover:text-inherit"
@@ -471,6 +524,91 @@ export default function PointSamplePage() {
 						</div>
 					</div>
 				)}
+
+				{passed !== null && (() => {
+					const excessMismatchCount = excessRowGroups.filter((g) => !g.timestampMatch).length
+					return (
+						<div className="border rounded-lg p-3 space-y-3">
+							<h4 className="font-semibold text-sm">Excess Row Checks</h4>
+
+							{/* Summary box */}
+							<div
+								className={cn(
+									"p-3 rounded border text-sm font-medium",
+									excessRowGroups.length === 0
+										? "border-slate-200 bg-slate-50 text-slate-600"
+										: excessMismatchCount > 0
+										? "border-red-300 bg-red-50 text-red-900"
+										: "border-green-300 bg-green-50 text-green-900"
+								)}
+							>
+								{excessRowGroups.length === 0
+									? "No X-to-End sections with rows in between were found."
+									: excessMismatchCount === 0
+									? `All ${excessRowGroups.length} X-to-End section(s) have matching timestamps.`
+									: `${excessMismatchCount} of ${excessRowGroups.length} X-to-End section(s) have mismatched timestamps.`}
+							</div>
+
+							{/* Groups */}
+							{excessRowGroups.map((group, gIdx) => (
+								<div key={gIdx} className="border rounded-lg overflow-hidden">
+									<div className={cn("px-3 py-2 text-xs font-semibold flex items-center justify-between", group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900")}>
+										<span>
+											Group {gIdx + 1}: Row {group.xRowIdx + 1} (X) → Row {group.endRowIdx + 1} (End)
+										</span>
+										<span className={cn("font-medium", group.timestampMatch ? "text-blue-700" : "text-red-700")}>
+											{group.timestampMatch ? "Timestamps match" : "Timestamps differ"}
+										</span>
+									</div>
+									<div className="overflow-x-auto">
+										<table className="w-full text-xs">
+											<thead className="border-b bg-slate-800 text-white">
+												<tr>
+													<th className="px-3 py-1.5 text-left font-semibold">Row</th>
+													<th className="px-3 py-1.5 text-left font-semibold">Timestamp</th>
+													<th className="px-3 py-1.5 text-left font-semibold">Data</th>
+													<th className="px-3 py-1.5 text-left font-semibold">Role</th>
+												</tr>
+											</thead>
+											<tbody>
+												{/* X row */}
+											<tr className={group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900"}>
+													<td className="px-3 py-1.5 font-mono">{group.xRowIdx + 1}</td>
+													<td className="px-3 py-1.5">{formatDisplayTime(group.xTimestamp)}</td>
+													<td className="px-3 py-1.5">{String(rows[group.xRowIdx]?.[2] || "")}</td>
+													<td className="px-3 py-1.5 font-semibold">X</td>
+												</tr>
+												{/* Between rows */}
+												{group.betweenRows.map((br, brIdx) => (
+												<tr key={brIdx} className={group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900"}>
+													<td className="px-3 py-1.5 font-mono">{br.rowIdx + 1}</td>
+													<td
+														className={cn(
+															"px-3 py-1.5",
+															!group.timestampMatch && br.timestamp !== group.xTimestamp && "font-bold underline"
+														)}
+													>
+														{formatDisplayTime(br.timestamp)}
+													</td>
+													<td className="px-3 py-1.5">{br.data}</td>
+													<td className={group.timestampMatch ? "px-3 py-1.5 text-blue-700" : "px-3 py-1.5 text-red-700"}>between</td>
+													</tr>
+												))}
+												{/* End row */}
+												<tr className={cn("border-t", group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900")}>
+													<td className="px-3 py-1.5 font-mono">{group.endRowIdx + 1}</td>
+													<td className="px-3 py-1.5">{formatDisplayTime(group.endTimestamp)}</td>
+													<td className="px-3 py-1.5">{String(rows[group.endRowIdx]?.[2] || "")}</td>
+													<td className={cn("px-3 py-1.5 font-semibold", group.timestampMatch ? "text-blue-700" : "text-red-700")}>End</td>
+												</tr>
+											</tbody>
+										</table>
+									</div>
+								</div>
+							))}
+						</div>
+					)
+				})()}
 			</div>
 		</div>
 	)
