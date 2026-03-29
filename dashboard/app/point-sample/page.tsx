@@ -19,6 +19,34 @@ interface UploadedFile {
 	file: File
 }
 
+interface FileAnalysis {
+	fileId: string
+	fileName: string
+	passed: boolean
+	issues: string[]
+	warnings: string[]
+	rows: any[][]
+	intervals: Array<{
+		row1: number
+		row2: number
+		time1: string
+		time2: string
+		data1: string
+		data2: string
+		intervalMin: number
+		status: "pass" | "fail"
+	}>
+	fixedIntervals: Set<string>
+	excessRowGroups: Array<{
+		xRowIdx: number
+		endRowIdx: number
+		xTimestamp: string
+		endTimestamp: string
+		betweenRows: {rowIdx: number; timestamp: string; data: string}[]
+		timestampMatch: boolean
+	}>
+}
+
 function excelDateToJSDate(serial: number): Date {
 	// Excel dates are stored as days since 1900-01-01 in local time
 	// We need to create a local date, not UTC
@@ -113,46 +141,26 @@ function normalizeRowsForValidation(rows: any[][]): any[][] {
 }
 
 export default function PointSamplePage() {
-	const [file, setFile] = useState<UploadedFile | null>(null)
+	const [files, setFiles] = useState<UploadedFile[]>([])
+	const [analyses, setAnalyses] = useState<FileAnalysis[]>([])
 	const [dragOver, setDragOver] = useState(false)
 	const [isProcessing, setIsProcessing] = useState(false)
 	const [error, setError] = useState<string | null>(null)
 	const [pointSampleFilter, setPointSampleFilter] = useState<"all" | "passed" | "failed">("all")
-	const [intervals, setIntervals] = useState<
-		Array<{
-			row1: number
-			row2: number
-			time1: string
-			time2: string
-			data1: string
-			data2: string
-			intervalMin: number
-			status: "pass" | "fail"
-		}>
-	>([])
-	const [issues, setIssues] = useState<string[]>([])
-	const [warnings, setWarnings] = useState<string[]>([])
-	const [passed, setPassed] = useState<boolean | null>(null)
-	const [rows, setRows] = useState<any[][]>([])
-	const [fixedIntervals, setFixedIntervals] = useState<Set<string>>(new Set())
-	const [excessRowGroups, setExcessRowGroups] = useState<Array<{
-		xRowIdx: number
-		endRowIdx: number
-		xTimestamp: string
-		endTimestamp: string
-		betweenRows: {rowIdx: number; timestamp: string; data: string}[]
-		timestampMatch: boolean
-	}>>([])
 
-
-	const toggleIntervalFixed = (intervalKey: string) => {
-		const newSet = new Set(fixedIntervals)
-		if (newSet.has(intervalKey)) {
-			newSet.delete(intervalKey)
-		} else {
-			newSet.add(intervalKey)
-		}
-		setFixedIntervals(newSet)
+	const toggleIntervalFixed = (fileId: string, intervalKey: string) => {
+		setAnalyses((prev) =>
+			prev.map((analysis) => {
+				if (analysis.fileId !== fileId) return analysis
+				const newSet = new Set(analysis.fixedIntervals)
+				if (newSet.has(intervalKey)) {
+					newSet.delete(intervalKey)
+				} else {
+					newSet.add(intervalKey)
+				}
+				return {...analysis, fixedIntervals: newSet}
+			})
+		)
 	}
 
 	const handleDrop = (e: React.DragEvent) => {
@@ -177,19 +185,25 @@ export default function PointSamplePage() {
 	}
 
 	const handleFiles = (newFiles: File[]) => {
-		const excelFile = newFiles.find((f) => f.name.endsWith(".xls") || f.name.endsWith(".xlsx"))
+		const excelFiles = newFiles.filter((f) => f.name.endsWith(".xls") || f.name.endsWith(".xlsx"))
 
-		if (!excelFile) {
+		if (excelFiles.length === 0) {
 			setError("Please upload a .xls or .xlsx file.")
 			return
 		}
 
 		setError(null)
-		setFile({
-			id: Math.random().toString(36).substring(2),
-			name: excelFile.name,
-			size: excelFile.size,
-			file: excelFile,
+		setFiles((prev) => {
+			const existingKeys = new Set(prev.map((f) => `${f.name}-${f.size}`))
+			const appended = excelFiles
+				.filter((f) => !existingKeys.has(`${f.name}-${f.size}`))
+				.map((excelFile) => ({
+					id: Math.random().toString(36).substring(2),
+					name: excelFile.name,
+					size: excelFile.size,
+					file: excelFile,
+				}))
+			return [...prev, ...appended]
 		})
 	}
 
@@ -202,64 +216,68 @@ export default function PointSamplePage() {
 	}
 
 	const runPointSampleCheck = async () => {
-		if (!file) return
+		if (files.length === 0) return
 
 		setIsProcessing(true)
 		setError(null)
 
 		try {
-			const buffer = await file.file.arrayBuffer()
-			const rawRows = parseExcelFile(buffer)
-			const normalizedRows = normalizeRowsForValidation(rawRows)
-			setRows(normalizedRows)
+			const nextAnalyses: FileAnalysis[] = []
 
-			const validation = checkPointSampleIntervals(normalizedRows)
-			setIntervals(validation.pointSampleIntervals || [])
-			setIssues(validation.issues)
-			setWarnings(validation.warnings)
-			setPassed(validation.passed)
+			for (const currentFile of files) {
+				const buffer = await currentFile.file.arrayBuffer()
+				const rawRows = parseExcelFile(buffer)
+				const normalizedRows = normalizeRowsForValidation(rawRows)
 
-			// Excess row check: find X-to-End sections with rows in between
-			const errGroups: Array<{
-				xRowIdx: number
-				endRowIdx: number
-				xTimestamp: string
-				endTimestamp: string
-				betweenRows: {rowIdx: number; timestamp: string; data: string}[]
-				timestampMatch: boolean
-			}> = []
-			for (let i = 0; i < normalizedRows.length; i++) {
-				const cellData = String(normalizedRows[i][2] || "").trim()
-				if (cellData.toLowerCase().startsWith("end")) {
-					let xIdx = -1
-					for (let j = i - 1; j >= 0; j--) {
-						if (String(normalizedRows[j][2] || "").trim().startsWith("X")) {
-							xIdx = j
-							break
+				const validation = checkPointSampleIntervals(normalizedRows)
+
+				const errGroups: FileAnalysis["excessRowGroups"] = []
+				for (let i = 0; i < normalizedRows.length; i++) {
+					const cellData = String(normalizedRows[i][2] || "").trim()
+					if (cellData.toLowerCase().startsWith("end")) {
+						let xIdx = -1
+						for (let j = i - 1; j >= 0; j--) {
+							if (String(normalizedRows[j][2] || "").trim().startsWith("X")) {
+								xIdx = j
+								break
+							}
 						}
-					}
-					if (xIdx >= 0 && i - xIdx > 1) {
-						const xTs = String(normalizedRows[xIdx][1] || "")
-						const between: {rowIdx: number; timestamp: string; data: string}[] = []
-						let allMatch = true
-						for (let k = xIdx + 1; k < i; k++) {
-							const ts = String(normalizedRows[k][1] || "")
-							const d = String(normalizedRows[k][2] || "")
-							between.push({rowIdx: k, timestamp: ts, data: d})
-							if (ts !== xTs) allMatch = false
+						if (xIdx >= 0 && i - xIdx > 1) {
+							const xTs = String(normalizedRows[xIdx][1] || "")
+							const between: {rowIdx: number; timestamp: string; data: string}[] = []
+							let allMatch = true
+							for (let k = xIdx + 1; k < i; k++) {
+								const ts = String(normalizedRows[k][1] || "")
+								const d = String(normalizedRows[k][2] || "")
+								between.push({rowIdx: k, timestamp: ts, data: d})
+								if (ts !== xTs) allMatch = false
+							}
+							errGroups.push({
+								xRowIdx: xIdx,
+								endRowIdx: i,
+								xTimestamp: xTs,
+								endTimestamp: String(normalizedRows[i][1] || ""),
+								betweenRows: between,
+								timestampMatch: allMatch,
+							})
 						}
-						errGroups.push({
-							xRowIdx: xIdx,
-							endRowIdx: i,
-							xTimestamp: xTs,
-							endTimestamp: String(normalizedRows[i][1] || ""),
-							betweenRows: between,
-							timestampMatch: allMatch,
-						})
 					}
 				}
+
+				nextAnalyses.push({
+					fileId: currentFile.id,
+					fileName: currentFile.name,
+					passed: validation.passed,
+					issues: validation.issues,
+					warnings: validation.warnings,
+					rows: normalizedRows,
+					intervals: validation.pointSampleIntervals || [],
+					fixedIntervals: new Set<string>(),
+					excessRowGroups: errGroups,
+				})
 			}
-			setExcessRowGroups(errGroups)
+
+			setAnalyses(nextAnalyses)
 		} catch (err) {
 			console.error(err)
 			setError("Failed to analyze the file.")
@@ -268,13 +286,6 @@ export default function PointSamplePage() {
 		}
 	}
 
-	const filteredIntervals = intervals.filter((interval) => {
-		if (pointSampleFilter === "all") return true
-		if (pointSampleFilter === "passed") return interval.status === "pass"
-		if (pointSampleFilter === "failed") return interval.status === "fail"
-		return true
-	})
-
 	return (
 		<div className="flex flex-col min-h-screen gap-6">
 			<Navigation />
@@ -282,7 +293,7 @@ export default function PointSamplePage() {
 			<div className="flex flex-col gap-6 p-6 max-w-5xl mx-auto w-full">
 				<div className="text-center mb-4">
 					<h2 className="text-2xl font-semibold mb-2">Point Sample Check</h2>
-					<p className="text-muted-foreground">Upload a single file to validate point sample intervals.</p>
+					<p className="text-muted-foreground">Upload one or more files to validate point sample intervals.</p>
 				</div>
 
 				<Collapsible defaultOpen={true}>
@@ -291,10 +302,10 @@ export default function PointSamplePage() {
 							<ChevronDown className="w-5 h-5 transition-transform" />
 							<FileSpreadsheet className="w-5 h-5 text-blue-500" />
 							<div className="text-left">
-								<p className="font-semibold">Single File Upload</p>
-								<p className="text-sm text-muted-foreground">Upload a source Excel file to check point sample intervals</p>
+								<p className="font-semibold">Multi-File Upload</p>
+								<p className="text-sm text-muted-foreground">Upload source Excel files to check point sample intervals</p>
 							</div>
-							{file && <Badge variant="secondary" className="ml-auto">1 file</Badge>}
+							{files.length > 0 && <Badge variant="secondary" className="ml-auto">{files.length} file(s)</Badge>}
 						</div>
 					</CollapsibleTrigger>
 					<CollapsibleContent className="mt-2">
@@ -313,41 +324,37 @@ export default function PointSamplePage() {
 									<Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
 									<p className="text-sm text-muted-foreground mb-2">Drag and drop an Excel file here, or</p>
 									<label>
-										<input type="file" accept=".xls,.xlsx" className="hidden" onChange={handleFileInput} disabled={isProcessing} />
+										<input type="file" accept=".xls,.xlsx" multiple className="hidden" onChange={handleFileInput} disabled={isProcessing} />
 										<Button variant="outline" size="sm" asChild disabled={isProcessing} className="hover:text-inherit">
 											<span>Browse File</span>
 										</Button>
 									</label>
 								</div>
 
-								{file && (
+								{files.length > 0 && (
 									<div className="mt-4 space-y-2">
-										<p className="text-sm font-medium">Selected File</p>
-										<div className="flex items-center justify-between p-2 rounded bg-muted/50 text-sm">
-											<div className="flex items-center gap-2 min-w-0">
-												<FileSpreadsheet className="w-4 h-4 text-blue-500 flex-shrink-0" />
-												<span className="truncate">{file.name}</span>
-												<Badge variant="secondary" className="text-[10px]">
-													{(file.size / 1024).toFixed(1)} KB
-												</Badge>
+										<p className="text-sm font-medium">Selected Files</p>
+										{files.map((f) => (
+											<div key={f.id} className="flex items-center justify-between p-2 rounded bg-muted/50 text-sm">
+												<div className="flex items-center gap-2 min-w-0">
+													<FileSpreadsheet className="w-4 h-4 text-blue-500 flex-shrink-0" />
+													<span className="truncate">{f.name}</span>
+													<Badge variant="secondary" className="text-[10px]">
+														{(f.size / 1024).toFixed(1)} KB
+													</Badge>
+												</div>
+												<Button
+													variant="outline"
+													size="sm"
+													onClick={() => {
+														setFiles((prev) => prev.filter((x) => x.id !== f.id))
+														setAnalyses((prev) => prev.filter((x) => x.fileId !== f.id))
+													}}
+												>
+													Remove
+												</Button>
 											</div>
-											<Button
-												variant="outline"
-												size="sm"
-												onClick={() => {
-													setFile(null)
-													setIntervals([])
-													setIssues([])
-													setWarnings([])
-													setPassed(null)
-												setRows([])
-												setFixedIntervals(new Set())
-												setExcessRowGroups([])
-											}}
-											>
-												Remove
-											</Button>
-										</div>
+										))}
 									</div>
 								)}
 							</CardContent>
@@ -356,21 +363,15 @@ export default function PointSamplePage() {
 				</Collapsible>
 
 				<div className="flex gap-2">
-					<Button onClick={runPointSampleCheck} disabled={!file || isProcessing} className="flex-1" size="lg">
+					<Button onClick={runPointSampleCheck} disabled={files.length === 0 || isProcessing} className="flex-1" size="lg">
 						{isProcessing ? "Checking..." : "Run Point Sample Check"}
 					</Button>
 					<Button
 						variant="outline"
 						onClick={() => {
-							setFile(null)
-							setIntervals([])
-							setIssues([])
-							setWarnings([])
-							setPassed(null)
-							setRows([])
+							setFiles([])
+							setAnalyses([])
 							setError(null)
-							setFixedIntervals(new Set())
-							setExcessRowGroups([])
 						}}
 						disabled={isProcessing}
 						className="hover:text-inherit"
@@ -386,229 +387,192 @@ export default function PointSamplePage() {
 					</div>
 				)}
 
-				{passed !== null && (
-					<div className="space-y-4">
-						<div className="flex items-center justify-between p-3 rounded-lg border border-slate-200">
-							<span className="font-semibold text-sm">Point Sample Results</span>
-							<Badge
-								variant="secondary"
-								className={cn("text-xs", passed ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800")}
-							>
-								{passed ? "✅ Passed" : "❌ Issues Found"}
-							</Badge>
-						</div>
+				{analyses.map((analysis) => {
+					const filteredIntervals = analysis.intervals.filter((interval) => {
+						if (pointSampleFilter === "all") return true
+						if (pointSampleFilter === "passed") return interval.status === "pass"
+						if (pointSampleFilter === "failed") return interval.status === "fail"
+						return true
+					})
+					const excessMismatchCount = analysis.excessRowGroups.filter((g) => !g.timestampMatch).length
 
-						{issues.length > 0 && (
-							<div className="p-3 rounded-lg border border-red-300 bg-red-50 text-sm">
-								<p className="font-semibold text-red-900 mb-2">Issues</p>
-								<ul className="list-disc list-inside space-y-1 text-red-900">
-									{issues.map((issue, idx) => (
-										<li key={idx}>{issue}</li>
-									))}
-								</ul>
-							</div>
-						)}
-
-						{warnings.length > 0 && (
-							<div className="p-3 rounded-lg border border-yellow-300 bg-yellow-50 text-sm">
-								<p className="font-semibold text-yellow-900 mb-2">Warnings</p>
-								<ul className="list-disc list-inside space-y-1 text-yellow-900">
-									{warnings.map((warning, idx) => (
-										<li key={idx}>{warning}</li>
-									))}
-								</ul>
-							</div>
-						)}
-
-						<div className="border rounded-lg p-3">
-							<div className="flex items-center justify-between mb-3">
-								<h4 className="font-semibold text-sm">Point Sample Intervals</h4>
-								<div className="flex gap-2">
-									<Button
-										variant={pointSampleFilter === "all" ? "default" : "outline"}
-										size="sm"
-										onClick={() => setPointSampleFilter("all")}
-										className="text-xs h-7 hover:text-inherit"
-									>
-										All ({intervals.length})
-									</Button>
-									<Button
-										variant={pointSampleFilter === "passed" ? "default" : "outline"}
-										size="sm"
-										onClick={() => setPointSampleFilter("passed")}
-										className="text-xs h-7 bg-green-600 hover:bg-green-700 text-white hover:opacity-75 hover:text-inherit"
-									>
-										Passed ({intervals.filter((i) => i.status === "pass").length})
-									</Button>
-									<Button
-										variant={pointSampleFilter === "failed" ? "default" : "outline"}
-										size="sm"
-										onClick={() => setPointSampleFilter("failed")}
-										className="text-xs h-7 bg-red-600 hover:bg-red-700 text-white hover:opacity-75 hover:text-inherit"
-									>
-										Failed ({intervals.filter((i) => i.status === "fail").length})
-									</Button>
-								</div>
-							</div>
-
-							<div className="overflow-x-auto border rounded-lg max-h-96">
-								<table className="w-full text-xs">
-									<thead className="border-b sticky top-0 bg-slate-900 text-white">
-										<tr>
-											<th className="px-3 py-2 text-left font-semibold min-w-12">Row 1</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-24">Time 1</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-24">Y Data 1</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-12">Row 2</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-24">Time 2</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-24">Y Data 2</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-20">Duration (min)</th>
-											<th className="px-3 py-2 text-left font-semibold min-w-28">Valid (2-3 min)</th>
-										</tr>
-									</thead>
-									<tbody>
-										{filteredIntervals.map((interval, idx) => {
-											const data1 = interval.data1 || String(rows[interval.row1 - 1]?.[2] || "")
-											const data2 = interval.data2 || String(rows[interval.row2 - 1]?.[2] || "")
-											const intervalKey = `${interval.row1}-${interval.row2}`
-										const isFixed = fixedIntervals.has(intervalKey)
-										const time1Display = formatDisplayTime(interval.time1)
-										const time2Display = formatDisplayTime(interval.time2)
-
-											return (
-												<tr
-													key={idx}
-													className={cn(
-														"border-b hover:bg-slate-100 transition-colors",
-														idx % 2 === 0 && "bg-white",
-														interval.status === "pass" ? "bg-green-50" : isFixed ? "bg-yellow-50" : "bg-red-100"
-													)}
-												>
-													<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row1}</td>
-												<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{time1Display}</td>
-												<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data1}</td>
-												<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row2}</td>
-												<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{time2Display}</td>
-													<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data2}</td>
-													<td className={cn("px-3 py-2 font-mono font-semibold", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.intervalMin}</td>
-													<td className="px-3 py-2">
-														<div className="flex items-center gap-2">
-															{interval.status === "pass" ? (
-																<Badge className="bg-green-600 text-white">✓ Pass</Badge>
-															) : (
-																<Badge className={isFixed ? "bg-yellow-600 text-white" : "bg-red-600 text-white"}>
-																	{isFixed ? "✓ Fixed" : "✗ Fail"}
-																</Badge>
-															)}
-															{pointSampleFilter === "failed" && interval.status === "fail" && (
-																<input
-																	type="checkbox"
-																	checked={isFixed}
-																	onChange={() => toggleIntervalFixed(intervalKey)}
-																	className="w-4 h-4 cursor-pointer"
-																/>
-															)}
-														</div>
-													</td>
-												</tr>
-											)
-										})}
-									</tbody>
-								</table>
-							</div>
-
-							{filteredIntervals.length === 0 && (
-								<div className="text-center py-4 text-sm text-muted-foreground">
-									No intervals found for selected filter
-								</div>
-							)}
-						</div>
-					</div>
-				)}
-
-				{passed !== null && (() => {
-					const excessMismatchCount = excessRowGroups.filter((g) => !g.timestampMatch).length
 					return (
-						<div className="border rounded-lg p-3 space-y-3">
-							<h4 className="font-semibold text-sm">Excess Row Checks</h4>
-
-							{/* Summary box */}
-							<div
-								className={cn(
-									"p-3 rounded border text-sm font-medium",
-									excessRowGroups.length === 0
-										? "border-slate-200 bg-slate-50 text-slate-600"
-										: excessMismatchCount > 0
-										? "border-red-300 bg-red-50 text-red-900"
-										: "border-green-300 bg-green-50 text-green-900"
-								)}
-							>
-								{excessRowGroups.length === 0
-									? "No X-to-End sections with rows in between were found."
-									: excessMismatchCount === 0
-									? `All ${excessRowGroups.length} X-to-End section(s) have matching timestamps.`
-									: `${excessMismatchCount} of ${excessRowGroups.length} X-to-End section(s) have mismatched timestamps.`}
-							</div>
-
-							{/* Groups */}
-							{excessRowGroups.map((group, gIdx) => (
-								<div key={gIdx} className="border rounded-lg overflow-hidden">
-									<div className={cn("px-3 py-2 text-xs font-semibold flex items-center justify-between", group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900")}>
-										<span>
-											Group {gIdx + 1}: Row {group.xRowIdx + 1} (X) → Row {group.endRowIdx + 1} (End)
-										</span>
-										<span className={cn("font-medium", group.timestampMatch ? "text-blue-700" : "text-red-700")}>
-											{group.timestampMatch ? "Timestamps match" : "Timestamps differ"}
-										</span>
+						<Collapsible key={analysis.fileId} defaultOpen>
+							<CollapsibleTrigger className="w-full">
+								<div className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 cursor-pointer transition-colors">
+									<ChevronDown className="w-5 h-5 transition-transform" />
+									<FileSpreadsheet className="w-5 h-5 text-blue-500" />
+									<div className="text-left min-w-0 flex-1">
+										<p className="font-semibold truncate">{analysis.fileName}</p>
+										<p className="text-sm text-muted-foreground">Checks for this file</p>
 									</div>
-									<div className="overflow-x-auto">
-										<table className="w-full text-xs">
-											<thead className="border-b bg-slate-800 text-white">
-												<tr>
-													<th className="px-3 py-1.5 text-left font-semibold">Row</th>
-													<th className="px-3 py-1.5 text-left font-semibold">Timestamp</th>
-													<th className="px-3 py-1.5 text-left font-semibold">Data</th>
-													<th className="px-3 py-1.5 text-left font-semibold">Role</th>
-												</tr>
-											</thead>
-											<tbody>
-												{/* X row */}
-											<tr className={group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900"}>
-													<td className="px-3 py-1.5 font-mono">{group.xRowIdx + 1}</td>
-													<td className="px-3 py-1.5">{formatDisplayTime(group.xTimestamp)}</td>
-													<td className="px-3 py-1.5">{String(rows[group.xRowIdx]?.[2] || "")}</td>
-													<td className="px-3 py-1.5 font-semibold">X</td>
-												</tr>
-												{/* Between rows */}
-												{group.betweenRows.map((br, brIdx) => (
-												<tr key={brIdx} className={group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900"}>
-													<td className="px-3 py-1.5 font-mono">{br.rowIdx + 1}</td>
-													<td
-														className={cn(
-															"px-3 py-1.5",
-															!group.timestampMatch && br.timestamp !== group.xTimestamp && "font-bold underline"
-														)}
-													>
-														{formatDisplayTime(br.timestamp)}
-													</td>
-													<td className="px-3 py-1.5">{br.data}</td>
-													<td className={group.timestampMatch ? "px-3 py-1.5 text-blue-700" : "px-3 py-1.5 text-red-700"}>between</td>
-													</tr>
+									<Badge
+										variant="secondary"
+										className={cn("text-xs", analysis.passed ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800")}
+									>
+										{analysis.passed ? "✅ Passed" : "❌ Issues Found"}
+									</Badge>
+								</div>
+							</CollapsibleTrigger>
+							<CollapsibleContent className="mt-2 space-y-4">
+								<div className="space-y-4">
+									<div className="flex items-center justify-between p-3 rounded-lg border border-slate-200">
+										<span className="font-semibold text-sm">Point Sample Results</span>
+										<Badge
+											variant="secondary"
+											className={cn("text-xs", analysis.passed ? "bg-green-500/15 text-green-800" : "bg-red-500/15 text-red-800")}
+										>
+											{analysis.passed ? "✅ Passed" : "❌ Issues Found"}
+										</Badge>
+									</div>
+
+									{analysis.issues.length > 0 && (
+										<div className="p-3 rounded-lg border border-red-300 bg-red-50 text-sm">
+											<p className="font-semibold text-red-900 mb-2">Issues</p>
+											<ul className="list-disc list-inside space-y-1 text-red-900">
+												{analysis.issues.map((issue, idx) => (
+													<li key={idx}>{issue}</li>
 												))}
-												{/* End row */}
-												<tr className={cn("border-t", group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900")}>
-													<td className="px-3 py-1.5 font-mono">{group.endRowIdx + 1}</td>
-													<td className="px-3 py-1.5">{formatDisplayTime(group.endTimestamp)}</td>
-													<td className="px-3 py-1.5">{String(rows[group.endRowIdx]?.[2] || "")}</td>
-													<td className={cn("px-3 py-1.5 font-semibold", group.timestampMatch ? "text-blue-700" : "text-red-700")}>End</td>
-												</tr>
-											</tbody>
-										</table>
+											</ul>
+										</div>
+									)}
+
+									{analysis.warnings.length > 0 && (
+										<div className="p-3 rounded-lg border border-yellow-300 bg-yellow-50 text-sm">
+											<p className="font-semibold text-yellow-900 mb-2">Warnings</p>
+											<ul className="list-disc list-inside space-y-1 text-yellow-900">
+												{analysis.warnings.map((warning, idx) => (
+													<li key={idx}>{warning}</li>
+												))}
+											</ul>
+										</div>
+									)}
+
+									<div className="border rounded-lg p-3">
+										<div className="flex items-center justify-between mb-3">
+											<h4 className="font-semibold text-sm">Point Sample Intervals</h4>
+											<div className="flex gap-2">
+												<Button variant={pointSampleFilter === "all" ? "default" : "outline"} size="sm" onClick={() => setPointSampleFilter("all")} className="text-xs h-7 hover:text-inherit">
+													All ({analysis.intervals.length})
+												</Button>
+												<Button variant={pointSampleFilter === "passed" ? "default" : "outline"} size="sm" onClick={() => setPointSampleFilter("passed")} className="text-xs h-7 bg-green-600 hover:bg-green-700 text-white hover:opacity-75 hover:text-inherit">
+													Passed ({analysis.intervals.filter((i) => i.status === "pass").length})
+												</Button>
+												<Button variant={pointSampleFilter === "failed" ? "default" : "outline"} size="sm" onClick={() => setPointSampleFilter("failed")} className="text-xs h-7 bg-red-600 hover:bg-red-700 text-white hover:opacity-75 hover:text-inherit">
+													Failed ({analysis.intervals.filter((i) => i.status === "fail").length})
+												</Button>
+											</div>
+										</div>
+
+										<div className="overflow-x-auto border rounded-lg max-h-96">
+											<table className="w-full text-xs">
+												<thead className="border-b sticky top-0 bg-slate-900 text-white">
+													<tr>
+														<th className="px-3 py-2 text-left font-semibold min-w-12">Row 1</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-24">Time 1</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-24">Y Data 1</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-12">Row 2</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-24">Time 2</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-24">Y Data 2</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-20">Duration (min)</th>
+														<th className="px-3 py-2 text-left font-semibold min-w-28">Valid (2-3 min)</th>
+													</tr>
+												</thead>
+												<tbody>
+													{filteredIntervals.map((interval, idx) => {
+														const data1 = interval.data1 || String(analysis.rows[interval.row1 - 1]?.[2] || "")
+														const data2 = interval.data2 || String(analysis.rows[interval.row2 - 1]?.[2] || "")
+														const intervalKey = `${interval.row1}-${interval.row2}`
+														const isFixed = analysis.fixedIntervals.has(intervalKey)
+														const time1Display = formatDisplayTime(interval.time1)
+														const time2Display = formatDisplayTime(interval.time2)
+
+														return (
+															<tr key={idx} className={cn("border-b hover:bg-slate-100 transition-colors", idx % 2 === 0 && "bg-white", interval.status === "pass" ? "bg-green-50" : isFixed ? "bg-yellow-50" : "bg-red-100")}>
+																<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row1}</td>
+																<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{time1Display}</td>
+																<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data1}</td>
+																<td className={cn("px-3 py-2 font-mono", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.row2}</td>
+																<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{time2Display}</td>
+																<td className={cn("px-3 py-2 truncate", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-gray-700")}>{data2}</td>
+																<td className={cn("px-3 py-2 font-mono font-semibold", interval.status === "fail" && "text-red-900", interval.status === "pass" && "text-muted-foreground")}>{interval.intervalMin}</td>
+																<td className="px-3 py-2">
+																	<div className="flex items-center gap-2">
+																		{interval.status === "pass" ? <Badge className="bg-green-600 text-white">✓ Pass</Badge> : <Badge className={isFixed ? "bg-yellow-600 text-white" : "bg-red-600 text-white"}>{isFixed ? "✓ Fixed" : "✗ Fail"}</Badge>}
+																		{pointSampleFilter === "failed" && interval.status === "fail" && <input type="checkbox" checked={isFixed} onChange={() => toggleIntervalFixed(analysis.fileId, intervalKey)} className="w-4 h-4 cursor-pointer" />}
+																	</div>
+																</td>
+															</tr>
+														)
+													})}
+												</tbody>
+											</table>
+										</div>
+
+										{filteredIntervals.length === 0 && <div className="text-center py-4 text-sm text-muted-foreground">No intervals found for selected filter</div>}
 									</div>
 								</div>
-							))}
-						</div>
+
+								<div className="border rounded-lg p-3 space-y-3">
+									<h4 className="font-semibold text-sm">Excess Row Checks</h4>
+									<div className={cn("p-3 rounded border text-sm font-medium", analysis.excessRowGroups.length === 0 ? "border-slate-200 bg-slate-50 text-slate-600" : excessMismatchCount > 0 ? "border-red-300 bg-red-50 text-red-900" : "border-green-300 bg-green-50 text-green-900")}>
+										{analysis.excessRowGroups.length === 0 ? "No X-to-End sections with rows in between were found." : excessMismatchCount === 0 ? `All ${analysis.excessRowGroups.length} X-to-End section(s) have matching timestamps.` : `${excessMismatchCount} of ${analysis.excessRowGroups.length} X-to-End section(s) have mismatched timestamps.`}
+									</div>
+
+									{analysis.excessRowGroups.map((group, gIdx) => (
+										<Collapsible key={gIdx}>
+											<CollapsibleTrigger className="w-full">
+												<div className={cn("px-3 py-2 text-xs font-semibold flex items-center justify-between rounded-lg border", group.timestampMatch ? "bg-blue-100 text-blue-900 border-blue-200" : "bg-red-100 text-red-900 border-red-200")}>
+													<div className="flex items-center gap-2">
+														<ChevronDown className="w-3.5 h-3.5 flex-shrink-0" />
+														<span>Group {gIdx + 1}: Row {group.xRowIdx + 1} (X) → Row {group.endRowIdx + 1} (End)</span>
+													</div>
+													<span className={cn("font-medium", group.timestampMatch ? "text-blue-700" : "text-red-700")}>{group.timestampMatch ? "Timestamps match" : "Timestamps differ"}</span>
+												</div>
+											</CollapsibleTrigger>
+											<CollapsibleContent>
+												<div className="overflow-x-auto border border-t-0 rounded-b-lg">
+													<table className="w-full text-xs">
+														<thead className="border-b bg-slate-800 text-white">
+															<tr>
+																<th className="px-3 py-1.5 text-left font-semibold">Row</th>
+																<th className="px-3 py-1.5 text-left font-semibold">Timestamp</th>
+																<th className="px-3 py-1.5 text-left font-semibold">Data</th>
+																<th className="px-3 py-1.5 text-left font-semibold">Role</th>
+															</tr>
+														</thead>
+														<tbody>
+															<tr className={group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900"}>
+																<td className="px-3 py-1.5 font-mono">{group.xRowIdx + 1}</td>
+																<td className="px-3 py-1.5">{formatDisplayTime(group.xTimestamp)}</td>
+																<td className="px-3 py-1.5">{String(analysis.rows[group.xRowIdx]?.[2] || "")}</td>
+																<td className="px-3 py-1.5 font-semibold">X</td>
+															</tr>
+															{group.betweenRows.map((br, brIdx) => (
+																<tr key={brIdx} className={group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900"}>
+																	<td className="px-3 py-1.5 font-mono">{br.rowIdx + 1}</td>
+																	<td className={cn("px-3 py-1.5", !group.timestampMatch && br.timestamp !== group.xTimestamp && "font-bold underline")}>{formatDisplayTime(br.timestamp)}</td>
+																	<td className="px-3 py-1.5">{br.data}</td>
+																	<td className={group.timestampMatch ? "px-3 py-1.5 text-blue-700" : "px-3 py-1.5 text-red-700"}>between</td>
+																</tr>
+															))}
+															<tr className={cn("border-t", group.timestampMatch ? "bg-blue-100 text-blue-900" : "bg-red-100 text-red-900")}>
+																<td className="px-3 py-1.5 font-mono">{group.endRowIdx + 1}</td>
+																<td className="px-3 py-1.5">{formatDisplayTime(group.endTimestamp)}</td>
+																<td className="px-3 py-1.5">{String(analysis.rows[group.endRowIdx]?.[2] || "")}</td>
+																<td className={cn("px-3 py-1.5 font-semibold", group.timestampMatch ? "text-blue-700" : "text-red-700")}>End</td>
+															</tr>
+														</tbody>
+													</table>
+												</div>
+											</CollapsibleContent>
+										</Collapsible>
+									))}
+								</div>
+							</CollapsibleContent>
+						</Collapsible>
 					)
-				})()}
+				})}
 			</div>
 		</div>
 	)
