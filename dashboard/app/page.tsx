@@ -73,7 +73,7 @@ function formatIsoDate(isoDate: string | Date): string {
 
 function shouldOmitFromExcludedDownload(dataValue: unknown): boolean {
 	const value = String(dataValue ?? "").trim().toLowerCase()
-	return value.startsWith("f:") || value.startsWith("end:") || value === "end"
+	return value.startsWith("f:") || value.startsWith("end") || value === "end"
 }
 
 function toExcludedDownloadRow(row: any[] | undefined, fileName: string, rowIdx: number, withMetadata: boolean): any[] | null {
@@ -696,7 +696,7 @@ export default function Home() {
 
 				const worksheet = XLSX.utils.aoa_to_sheet(excludedRows)
 				const workbook = XLSX.utils.book_new()
-				XLSX.utils.book_append_sheet(workbook, worksheet, "Data")
+				XLSX.utils.book_append_sheet(workbook, worksheet, "DATA")
 
 				const excludedSuffix = withMetadata ? "_excluded_with_metadata" : "_excluded"
 				const excludedName = original.fileName.replace(/\.xE(\.xls[x]?)$/i, `${excludedSuffix}.xE$1`)
