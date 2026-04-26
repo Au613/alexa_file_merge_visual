@@ -71,6 +71,35 @@ function formatIsoDate(isoDate: string | Date): string {
 	return `${mm}/${dd}/${yyyy} ${hh}:${min}:${sec}`
 }
 
+function shouldOmitFromExcludedDownload(dataValue: unknown): boolean {
+	const value = String(dataValue ?? "").trim().toLowerCase()
+	return value.startsWith("f:") || value.startsWith("end:") || value === "end"
+}
+
+function toExcludedDownloadRow(row: any[] | undefined, fileName: string, rowIdx: number, withMetadata: boolean): any[] | null {
+	if (!row) return null
+
+	const rawDate = row[1]
+	const numericString = typeof rawDate === "string" && /^-?\d+(\.\d+)?$/.test(rawDate.trim())
+	let datetime = ""
+
+	if (rawDate instanceof Date) {
+		datetime = formatIsoDate(rawDate)
+	} else if (typeof rawDate === "number" && Number.isFinite(rawDate)) {
+		datetime = formatIsoDate(excelDateToJSDate(rawDate))
+	} else if (numericString) {
+		datetime = formatIsoDate(excelDateToJSDate(Number(rawDate)))
+	} else if (rawDate != null) {
+		datetime = String(rawDate)
+	}
+
+	if (withMetadata) {
+		return [String(row?.[0] ?? ""), datetime, String(row?.[2] ?? ""), fileName, rowIdx]
+	}
+
+	return [String(row?.[0] ?? ""), datetime, String(row?.[2] ?? "")]
+}
+
 function reconstructFilesFromMerged(mergedRows: any[][], droppedRows: any[][]): Map<string, any[][]> {
 	console.log(`=== RECONSTRUCT START: ${mergedRows.length} merged rows, ${droppedRows.length} dropped rows ===`)
 	
@@ -643,44 +672,31 @@ export default function Home() {
 				const original = originalMap.get(normalizeSourceFile(fileAnalysis.fileName))
 				if (!original) return
 
-				const excludedRows = [
-					withMetadata
-						? ["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"]
-						: ["Row Data (Author)", "DateTime", "Data"],
-					...fileAnalysis.droppedIndices.flatMap((rowIdx) => {
-						const row = original.rows[rowIdx]
-						if (!row) return []
-							const rawDate = row[1]
-							const numericString = typeof rawDate === "string" && /^-?\d+(\.\d+)?$/.test(rawDate.trim())
-							let datetime = ""
-							if (rawDate instanceof Date) {
-								datetime = formatIsoDate(rawDate)
-							} else if (typeof rawDate === "number" && Number.isFinite(rawDate)) {
-								datetime = formatIsoDate(excelDateToJSDate(rawDate))
-							} else if (numericString) {
-								datetime = formatIsoDate(excelDateToJSDate(Number(rawDate)))
-							} else if (rawDate != null) {
-								datetime = String(rawDate)
-							}
-							if (withMetadata) {
-								return [[
-									String(row?.[0] ?? ""),
-									datetime,
-									String(row?.[2] ?? ""),
-									fileAnalysis.fileName,
-									rowIdx,
-								]]
-							}
+				const headerRow = withMetadata
+					? ["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"]
+					: ["Row Data (Author)", "DateTime", "Data"]
 
-							return [[String(row?.[0] ?? ""), datetime, String(row?.[2] ?? "")]]
-						}),
-				]
+				const openingRows = [0, 1, 2]
+					.map((rowIdx) => toExcludedDownloadRow(original.rows[rowIdx], fileAnalysis.fileName, rowIdx, withMetadata))
+					.filter((row): row is any[] => row !== null)
+
+				const filteredDroppedRows = fileAnalysis.droppedIndices
+					.filter((rowIdx) => !openingRows.some((_, openingIdx) => openingIdx === rowIdx))
+					.flatMap((rowIdx) => {
+						const row = original.rows[rowIdx]
+						if (!row || shouldOmitFromExcludedDownload(row?.[2])) return []
+
+						const excludedRow = toExcludedDownloadRow(row, fileAnalysis.fileName, rowIdx, withMetadata)
+						return excludedRow ? [excludedRow] : []
+					})
+
+				const excludedRows = [headerRow, ...openingRows, ...filteredDroppedRows]
 
 				if (excludedRows.length <= 1) return
 
 				const worksheet = XLSX.utils.aoa_to_sheet(excludedRows)
 				const workbook = XLSX.utils.book_new()
-				XLSX.utils.book_append_sheet(workbook, worksheet, "Excluded Rows")
+				XLSX.utils.book_append_sheet(workbook, worksheet, "Data")
 
 				const excludedSuffix = withMetadata ? "_excluded_with_metadata" : "_excluded"
 				const excludedName = original.fileName.replace(/\.xE(\.xls[x]?)$/i, `${excludedSuffix}.xE$1`)

@@ -370,7 +370,7 @@ function makeOneContinuousFocalFollow_keepMeta(data: any[][]) {
 function buildXlsBuffer(data: any[][]): Buffer {
   const workbook = XLSX.utils.book_new()
   const sheet = XLSX.utils.aoa_to_sheet(data)
-  XLSX.utils.book_append_sheet(workbook, sheet, "Sheet1")
+  XLSX.utils.book_append_sheet(workbook, sheet, "Data")
   return XLSX.write(workbook, { type: "buffer", bookType: "xls" }) as Buffer
 }
 
