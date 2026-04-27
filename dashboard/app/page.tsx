@@ -672,10 +672,6 @@ export default function Home() {
 				const original = originalMap.get(normalizeSourceFile(fileAnalysis.fileName))
 				if (!original) return
 
-				const headerRow = withMetadata
-					? ["Row Data (Author)", "DateTime", "Data", "Source File", "Original Row Number"]
-					: ["Row Data (Author)", "DateTime", "Data"]
-
 				const openingRows = [0, 1, 2]
 					.map((rowIdx) => toExcludedDownloadRow(original.rows[rowIdx], fileAnalysis.fileName, rowIdx, withMetadata))
 					.filter((row): row is any[] => row !== null)
@@ -690,9 +686,9 @@ export default function Home() {
 						return excludedRow ? [excludedRow] : []
 					})
 
-				const excludedRows = [headerRow, ...openingRows, ...filteredDroppedRows]
+				const excludedRows = [...openingRows, ...filteredDroppedRows]
 
-				if (excludedRows.length <= 1) return
+				if (excludedRows.length === 0) return
 
 				const worksheet = XLSX.utils.aoa_to_sheet(excludedRows)
 				const workbook = XLSX.utils.book_new()
